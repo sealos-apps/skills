@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "description": "Public Sealos tools.sh capability catalog used by sealos-apps-audit.",
+  "functions": {
+    "all": [
+      "bool_is_true",
+      "ensure_cm_value",
+      "fetch_configmap_data_key",
+      "fetch_configmap_field",
+      "get_cm_value",
+      "global_http_disable_https",
+      "global_http_effective_port",
+      "global_http_external_url",
+      "global_http_port_suffix",
+      "global_http_scheme",
+      "init_feature_flags",
+      "is_feature_enabled",
+      "read_account_service_name",
+      "read_cert_tls_reject_unauthorized",
+      "read_jwt_internal",
+      "read_prometheus_url",
+      "read_yaml_file_path",
+      "set_cm_value"
+    ]
+  }
+}
+

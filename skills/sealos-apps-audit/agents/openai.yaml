@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sealos Apps Audit"
+  short_description: "只读审计 Sealos 应用 deploy/Helm/CI 规范"
+  default_prompt: "使用 $sealos-apps-audit 对 Sealos 应用源码仓库做只读规范审计。先确认目标仓库、deploy 检测目录和应用类型 app/sealos-core；运行审计脚本检查 deploy、Helm、CI、多架构、OSS 同步、values、global.http、Node TLS 和数据库规则；不执行部署、构建、推送或集群写操作；输出中文报告和整改建议。"

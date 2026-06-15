@@ -1,0 +1,20 @@
+cloudDomain: example.test
+cloudPort: "443"
+httpPort: "80"
+disableHttps: "false"
+certSecretName: example-cert
+database:
+  kubeblocksVersion: "0.8.2"
+global:
+  featureConfigs:
+    database:
+      components:
+        postgresql:
+          type: postgresql
+          example:
+            name: example-postgresql
+        mongodb:
+          type: postgresql
+          traffic-service:
+            name: traffic-mongodb
+

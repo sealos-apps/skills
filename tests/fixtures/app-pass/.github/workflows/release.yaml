@@ -1,0 +1,37 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: |
+          docker buildx build --platform linux/${{ matrix.arch }} -t ghcr.io/sealos-apps/example-app:${{ matrix.arch }} .
+      - name: Cache images
+        working-directory: deploy
+        run: |
+          sealos registry save --registry-dir=registry --arch ${{ matrix.arch }} .
+      - name: Build cluster image
+        run: |
+          docker buildx build --platform linux/${{ matrix.arch }} -t ghcr.io/sealos-apps/example-app-cluster:${{ matrix.arch }} deploy
+          docker images
+      - name: Publish manifests
+        run: |
+          docker buildx imagetools create -t ghcr.io/sealos-apps/example-app:latest ghcr.io/sealos-apps/example-app:amd64 ghcr.io/sealos-apps/example-app:arm64
+          docker buildx imagetools create -t ghcr.io/sealos-apps/example-app-cluster:latest ghcr.io/sealos-apps/example-app-cluster:amd64 ghcr.io/sealos-apps/example-app-cluster:arm64
+      - name: Export and sync OSS
+        run: |
+          mkdir -p release-assets
+          touch release-assets/example-app-cluster.tar.gz
+          md5sum release-assets/example-app-cluster.tar.gz > release-assets/example-app-cluster.tar.gz.md5
+          du -h release-assets/example-app-cluster.tar.gz
+          ossutil cp release-assets/example-app-cluster.tar.gz oss://sealos-apps/example-app/
+          ossutil cp release-assets/example-app-cluster.tar.gz.md5 oss://sealos-apps/example-app/
+

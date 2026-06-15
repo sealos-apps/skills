@@ -1,0 +1,6 @@
+cloudDomain: example.test
+cloudPort: "443"
+httpPort: "80"
+disableHttps: "false"
+certSecretName: example-cert
+

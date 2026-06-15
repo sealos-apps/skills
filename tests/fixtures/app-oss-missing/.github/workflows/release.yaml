@@ -1,0 +1,17 @@
+name: release
+on:
+  push:
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker buildx build --platform linux/${{ matrix.arch }} -t ghcr.io/sealos-apps/example-app:${{ matrix.arch }} .
+      - working-directory: deploy
+        run: sealos registry save --registry-dir=registry --arch ${{ matrix.arch }} .
+      - run: docker buildx imagetools create -t ghcr.io/sealos-apps/example-app-cluster:latest ghcr.io/sealos-apps/example-app-cluster:amd64 ghcr.io/sealos-apps/example-app-cluster:arm64
+      - run: docker images
+
