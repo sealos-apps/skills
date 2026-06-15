@@ -34,6 +34,26 @@ def run_audit(fixture: str) -> dict[str, object]:
     return json.loads(result.stdout)
 
 
+def run_audit_markdown(fixture: str) -> str:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            str(FIXTURES / fixture),
+            "--deploy-dir",
+            "deploy",
+            "--app-type",
+            "app",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode not in {0, 1}:
+        raise AssertionError(result.stderr or result.stdout)
+    return result.stdout
+
+
 def levels_by_rule(payload: dict[str, object]) -> dict[str, list[str]]:
     levels: dict[str, list[str]] = {}
     for finding in payload["findings"]:
@@ -76,6 +96,12 @@ class SealosAppsAuditTest(unittest.TestCase):
         levels = levels_by_rule(payload)
         self.assertIn("FAIL", levels["DEPLOY_BUILD_FILE"])
         self.assertIn("FAIL", levels["HELM_ENTRYPOINT"])
+
+    def test_missing_workflow_marks_workflow_summary_categories_failed(self) -> None:
+        report = run_audit_markdown("app-fail")
+        self.assertIn("| Runtime/Cluster 镜像分离 | FAIL | 缺少 .github/workflows 下的构建流水线。 |", report)
+        self.assertIn("| 双架构 | FAIL | 缺少 .github/workflows 下的构建流水线。 |", report)
+        self.assertIn("| OSS 推送 | FAIL | 缺少 .github/workflows 下的构建流水线。 |", report)
 
 
 if __name__ == "__main__":

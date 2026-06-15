@@ -18,9 +18,9 @@ IGNORED_DIRS = {".git", ".next", ".turbo", "build", "dist", "node_modules", "ven
 CATEGORY_RULES = [
     ("Deploy 结构", ["DEPLOY_DIR", "DEPLOY_BUILD_FILE", "DEPLOY_CHART", "CLUSTER_IMAGE_PACKAGING"]),
     ("Helm 部署", ["HELM_ENTRYPOINT", "HELM_CREATE_NAMESPACE", "HELM_NAMESPACE_TEMPLATE"]),
-    ("Runtime/Cluster 镜像分离", ["WORKFLOW_IMAGE_SPLIT", "WORKFLOW_IMAGE_CACHE"]),
-    ("双架构", ["WORKFLOW_MULTI_ARCH"]),
-    ("OSS 推送", ["WORKFLOW_OSS_SYNC"]),
+    ("Runtime/Cluster 镜像分离", ["WORKFLOW_EXISTS", "WORKFLOW_IMAGE_SPLIT", "WORKFLOW_IMAGE_CACHE"]),
+    ("双架构", ["WORKFLOW_EXISTS", "WORKFLOW_MULTI_ARCH"]),
+    ("OSS 推送", ["WORKFLOW_EXISTS", "WORKFLOW_OSS_SYNC"]),
     ("Values 读取策略", ["VALUES_CHART_CONTENT", "VALUES_STRATEGY"]),
     ("Tools 函数依赖", ["TOOLS_FUNCTION_DEPENDENCY"]),
     ("Node TLS", ["NODE_TLS_REJECT_UNAUTHORIZED"]),
