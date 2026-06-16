@@ -4,7 +4,7 @@ Public Codex skills for the `sealos-apps` organization.
 
 ## Skills
 
-- `sealos-apps-audit`: read-only audit for Sealos app source repositories, covering deploy layout, Helm entrypoints, GitHub Actions release flow, multi-arch images, mandatory OSS sync, values loading, `global.http`, Node TLS, and optional database compatibility checks.
+- `sealos-apps-audit`: read-only audit for Sealos app source repositories, covering deploy layout, Helm entrypoints, GitHub Actions release flow, public GHCR image naming, runtime/cluster multi-arch evidence, mandatory OSS sync, values loading, `global.http` HTTP-mode rendering, Node TLS, and optional database compatibility checks.
 
 ## Use
 
@@ -28,6 +28,8 @@ python3 skills/sealos-apps-audit/scripts/audit_sealos_apps.py \
 ```
 
 The audit is read-only. It does not deploy, build, push images, or mutate clusters.
+
+Rule details live in `skills/sealos-apps-audit/references/deploy-standard.zh.md`; human report requirements live in `skills/sealos-apps-audit/references/report-format.zh.md`.
 
 ## Validate This Repository
 

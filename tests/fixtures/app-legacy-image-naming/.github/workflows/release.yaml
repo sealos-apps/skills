@@ -13,19 +13,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build runtime image
         run: |
-          docker buildx build --platform linux/${{ matrix.arch }} -t ghcr.io/${{ github.repository }}/${{ github.repository }}:${{ matrix.arch }} .
+          docker buildx build --platform linux/${{ matrix.arch }} -t ghcr.io/${{ github.repository }}:${{ matrix.arch }} .
       - name: Cache images
         working-directory: deploy
         run: |
           sealos registry save --registry-dir=registry --arch ${{ matrix.arch }} .
       - name: Build cluster image
         run: |
-          docker buildx build --platform linux/${{ matrix.arch }} -t ghcr.io/${{ github.repository }}/${{ github.repository }}-cluster:${{ matrix.arch }} deploy
+          docker buildx build --platform linux/${{ matrix.arch }} -t ghcr.io/${{ github.repository }}-cluster:${{ matrix.arch }} deploy
           docker images
       - name: Publish manifests
         run: |
-          docker buildx imagetools create -t ghcr.io/${{ github.repository }}/${{ github.repository }}:latest ghcr.io/${{ github.repository }}/${{ github.repository }}:amd64 ghcr.io/${{ github.repository }}/${{ github.repository }}:arm64
-          docker buildx imagetools create -t ghcr.io/${{ github.repository }}/${{ github.repository }}-cluster:latest ghcr.io/${{ github.repository }}/${{ github.repository }}-cluster:amd64 ghcr.io/${{ github.repository }}/${{ github.repository }}-cluster:arm64
+          docker buildx imagetools create -t ghcr.io/${{ github.repository }}:latest ghcr.io/${{ github.repository }}:amd64 ghcr.io/${{ github.repository }}:arm64
+          docker buildx imagetools create -t ghcr.io/${{ github.repository }}-cluster:latest ghcr.io/${{ github.repository }}-cluster:amd64 ghcr.io/${{ github.repository }}-cluster:arm64
       - name: Export and sync OSS
         run: |
           mkdir -p release-assets
