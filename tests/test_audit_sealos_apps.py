@@ -91,6 +91,27 @@ class SealosAppsAuditTest(unittest.TestCase):
         levels = levels_by_rule(payload)
         self.assertIn("FAIL", levels["GLOBAL_HTTP_HARDCODED_EXTERNAL_URL"])
 
+    def test_http_ingress_tls_must_be_conditional(self) -> None:
+        payload = run_audit("app-http-ingress-unconditional")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["GLOBAL_HTTP_INGRESS_TLS"])
+
+    def test_node_tls_requires_full_template_and_values_chain(self) -> None:
+        payload = run_audit("app-node-tls-incomplete")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["NODE_TLS_REJECT_UNAUTHORIZED"])
+
+    def test_legacy_ghcr_repository_image_names_are_forbidden(self) -> None:
+        payload = run_audit("app-legacy-image-naming")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["WORKFLOW_IMAGE_SPLIT"])
+        self.assertIn("FAIL", levels["WORKFLOW_IMAGE_NAMING"])
+
+    def test_manifest_multi_arch_requires_runtime_and_cluster_context(self) -> None:
+        payload = run_audit("app-multi-arch-context-missing")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["WORKFLOW_MULTI_ARCH"])
+
     def test_basic_bad_fixture_fails_deploy_rules(self) -> None:
         payload = run_audit("app-fail")
         levels = levels_by_rule(payload)

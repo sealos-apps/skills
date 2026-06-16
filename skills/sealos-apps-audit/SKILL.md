@@ -1,6 +1,6 @@
 ---
 name: sealos-apps-audit
-description: Read-only audit for public Sealos app source repositories. Use when Codex needs to check, review, validate, or report whether a Sealos app repository follows deploy/Helm/GitHub Actions release standards, including Dockerfile/Kubefile/Sealfile, charts, runtime and cluster image separation, linux/amd64 and linux/arm64, mandatory OSS tar/md5 sync, apps/core values loading, tools.sh dependency, global.http HTTP/HTTPS behavior, Node TLS, KubeBlocks, and optional domestic database compatibility. Outputs findings and remediation only; never deploys, builds, pushes, or mutates clusters.
+description: Read-only audit for public Sealos app source repositories. Use when Codex needs to check, review, validate, or report whether a Sealos app repository follows deploy/Helm/GitHub Actions release standards, including Dockerfile/Kubefile/Sealfile, charts, runtime and cluster image separation, public GHCR image naming, linux/amd64 and linux/arm64 runtime/cluster multi-arch evidence, mandatory OSS tar/md5 sync, apps/core values loading, tools.sh dependency, global.http HTTP/HTTPS behavior with local helm-template HTTP-mode validation, Node TLS based on cert-config CERT_MODE, KubeBlocks, and optional domestic database compatibility. Outputs findings and remediation only; never deploys, builds, pushes, or mutates clusters.
 ---
 
 # Sealos Apps Audit
@@ -17,7 +17,8 @@ Use this skill to audit Sealos app source repositories without modifying them. T
    - `app`: regular Sealos app, expected to load apps values.
    - `sealos-core`: SealosCore component, expected to load core values.
 4. When the user asks about rule meaning or remediation details, read `references/deploy-standard.zh.md`.
-5. Run the audit script:
+5. When the user asks how the human report should be written, read `references/report-format.zh.md`.
+6. Run the audit script:
 
    ```bash
    python3 <this-skill>/scripts/audit_sealos_apps.py <repo-root> --deploy-dir <deploy-dir> --app-type <app-or-sealos-core>
@@ -25,13 +26,21 @@ Use this skill to audit Sealos app source repositories without modifying them. T
 
    Use repeated `--deploy-dir` flags for multiple deploy directories.
 
-6. Use JSON only for automation or debugging:
+7. Use JSON only for automation or debugging:
 
    ```bash
    python3 <this-skill>/scripts/audit_sealos_apps.py <repo-root> --deploy-dir <deploy-dir> --app-type <app-or-sealos-core> --format json
    ```
 
-7. Report the Markdown output using `总体结论`, `主要问题`, and `通过项依据`. Do not use the raw finding table as the main human report.
+8. Report the Markdown output using `总体结论`, `主要问题`, and `通过项依据`. Do not use the raw finding table as the main human report.
+
+## Public Rule Notes
+
+- `global.http` is checked across entrypoint arguments, chart values, template static scanning, and local `helm template` HTTP-mode rendering when Helm is available.
+- Node TLS is required only when Node/frontend signals are detected, and must connect `CERT_MODE` to `platform.tlsRejectUnauthorized` and container `NODE_TLS_REJECT_UNAUTHORIZED`.
+- GitHub Actions must avoid the legacy image names `ghcr.io/${{ github.repository }}` and `ghcr.io/${{ github.repository }}-cluster`; use the nested public GHCR package names documented in `references/deploy-standard.zh.md`.
+- Multi-arch evidence must distinguish runtime and cluster artifacts when manifest/imagetools are used; buildx multi-platform evidence is accepted when amd64 and arm64 are both present.
+- Human reports should include evidence, impact, remediation, and recheck guidance for each `FAIL` or `WARN`.
 
 ## Boundaries
 

@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,7 +20,7 @@ IGNORED_DIRS = {".git", ".next", ".turbo", "build", "dist", "node_modules", "ven
 CATEGORY_RULES = [
     ("Deploy 结构", ["DEPLOY_DIR", "DEPLOY_BUILD_FILE", "DEPLOY_CHART", "CLUSTER_IMAGE_PACKAGING"]),
     ("Helm 部署", ["HELM_ENTRYPOINT", "HELM_CREATE_NAMESPACE", "HELM_NAMESPACE_TEMPLATE"]),
-    ("Runtime/Cluster 镜像分离", ["WORKFLOW_EXISTS", "WORKFLOW_IMAGE_SPLIT", "WORKFLOW_IMAGE_CACHE"]),
+    ("Runtime/Cluster 镜像分离", ["WORKFLOW_EXISTS", "WORKFLOW_IMAGE_SPLIT", "WORKFLOW_IMAGE_NAMING", "WORKFLOW_IMAGE_CACHE"]),
     ("双架构", ["WORKFLOW_EXISTS", "WORKFLOW_MULTI_ARCH"]),
     ("OSS 推送", ["WORKFLOW_EXISTS", "WORKFLOW_OSS_SYNC"]),
     ("Values 读取策略", ["VALUES_CHART_CONTENT", "VALUES_STRATEGY"]),
@@ -33,11 +35,27 @@ TOOLS_CATALOG_PATH = SCRIPT_PATH.parents[1] / "references" / "tools-functions.pu
 TOOLS_PATH_PATTERN = re.compile(r"(?:^|\s)(?:\.|source)\s+['\"]?/root/\.sealos/cloud/scripts/tools\.sh['\"]?")
 SHELL_FUNCTION_PATTERN = re.compile(r"(?m)^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?\s*\{")
 NODE_SIGNAL_PATTERN = re.compile(
-    r"NODE_TLS_REJECT_UNAUTHORIZED|frontend\s*:|frontend\.(?:enabled|image|env)|node_modules|npm\s+(?:run|start|build)|pnpm\s+(?:run|start|build)|yarn\s+(?:run|start|build)|next\s+(?:start|build)",
-    re.IGNORECASE,
+    r"NODE_TLS_REJECT_UNAUTHORIZED|"
+    r"^\s*frontend\s*:|"
+    r"\bfrontend\.(?:enabled|image|env|namespace|replicas)\b|"
+    r"\bname:\s*[^\n]*frontend\b|"
+    r"\bapp:\s*[^\n]*frontend\b|"
+    r"\bnode_modules\b|"
+    r"\bnpm\s+(?:ci|install|run|start|build)\b|"
+    r"\bpnpm\s+(?:install|run|start|build)\b|"
+    r"\byarn\s+(?:install|run|start|build)\b|"
+    r"\bnext\s+(?:start|build)\b",
+    re.IGNORECASE | re.MULTILINE,
 )
 SIZE_PATTERN = re.compile(
-    r"docker\s+image\s+inspect|docker\s+images\b|docker\s+image\s+ls\b|docker\s+buildx\s+imagetools\s+inspect\b|du\s+-[A-Za-z]*h|ls\s+-[A-Za-z]*h|stat\s+(?:-c%s|-f%z)|wc\s+-c",
+    r"docker\s+image\s+inspect[\s\S]{0,200}\.Size|"
+    r"docker\s+images\b|"
+    r"docker\s+image\s+ls\b|"
+    r"docker\s+buildx\s+imagetools\s+inspect\b|"
+    r"du\s+(?:-[A-Za-z]*h[A-Za-z]*|--human-readable)[^\n]*(?:release-assets|\.tar\.gz)|"
+    r"ls\s+-[A-Za-z]*h[A-Za-z]*[^\n]*(?:release-assets|\.tar\.gz)|"
+    r"stat\s+(?:-c%s|-f%z|--format=%s)[^\n]*(?:release-assets|\.tar\.gz)|"
+    r"wc\s+-c[^\n]*(?:release-assets|\.tar\.gz)",
     re.IGNORECASE,
 )
 DOMESTIC_DB_PATTERN = re.compile(
@@ -45,10 +63,11 @@ DOMESTIC_DB_PATTERN = re.compile(
     re.IGNORECASE,
 )
 TOOLS_CAPABILITY_RULES = [
-    ("ConfigMap 读写", {"get_cm_value", "set_cm_value", "ensure_cm_value", "fetch_configmap_data_key"}, [r"\bkubectl\s+get\s+configmap\b", r"\bkubectl\s+patch\s+configmap\b"], "FAIL"),
-    ("runtime global.yaml 读取", {"read_yaml_file_path"}, [r"/root/\.sealos/cloud/values/global\.yaml", r"\bglobal\.featureConfigs\b", r"\byq\s+e\b"], "FAIL"),
-    ("global.http URL/协议/端口", {"global_http_disable_https", "global_http_external_url"}, [r"\bdisableHttps\b", r"\bSEALOS_DISABLE_HTTPS\b", r"\bSEALOS_HTTP_PORT\b", r"\bhttps://", r":443\b"], "FAIL"),
+    ("ConfigMap 读写", {"get_cm_value", "set_cm_value", "ensure_cm_value", "fetch_configmap_data_key", "fetch_configmap_field"}, [r"\bkubectl\s+get\s+configmap\b", r"\bkubectl\s+patch\s+configmap\b", r"\bkubectl\s+-n\s+[^;\n]+create\s+configmap\b", r"\bjsonpath=\{\.data\."], "FAIL"),
+    ("runtime global.yaml 读取", {"read_yaml_file_path"}, [r"/root/\.sealos/cloud/values/global\.yaml", r"\bglobal\.featureConfigs\b", r"\bglobal\.http\b", r"\byq\s+e\b"], "FAIL"),
+    ("global.http URL/协议/端口", {"bool_is_true", "global_http_disable_https", "global_http_effective_port", "global_http_external_url", "global_http_port_suffix", "global_http_scheme"}, [r"\bdisableHttps\b", r"\bSEALOS_DISABLE_HTTPS\b", r"\bSEALOS_HTTP_PORT\b", r"\bSEALOS_CLOUD_PORT\b", r"\bhttps\|acme\b", r"\bhttp://|\bhttps://", r":443\b"], "FAIL"),
     ("证书模式/Node TLS", {"read_cert_tls_reject_unauthorized"}, [r"\bCERT_MODE\b", r"\bcert-config\b", r"\bNODE_TLS_REJECT_UNAUTHORIZED\b"], "FAIL"),
+    ("平台通用配置读取", {"read_jwt_internal", "read_prometheus_url", "read_account_service_name"}, [r"\bjwtInternal\b", r"\bACCOUNT_API_JWT_SECRET\b", r"\bprometheus\b", r"\baccount-manager-env\b"], "WARN"),
     ("Feature Flag", {"is_feature_enabled", "init_feature_flags"}, [r"\benabledFeatures\b", r"\bfeatureConfigs\.enabledFeatures\b"], "WARN"),
 ]
 
@@ -203,25 +222,58 @@ class Checker:
             self.add("WORKFLOW_EXISTS", "FAIL", "缺少 .github/workflows 下的构建流水线。", "新增 GitHub Actions 流水线，覆盖 runtime image、cluster image、manifest、tar/md5 和 OSS 同步。", self.workflow_dir)
             return
         combined = "\n".join(read_text(path) for path in self.workflow_files)
-        runtime = re.search(r"RUNTIME_IMAGE|runtime image|frontend|backend|ghcr\.io/.+", combined, re.IGNORECASE)
-        cluster = re.search(r"CLUSTER_IMAGE|SEALOS_IMAGE|cluster image|sealos image|-cluster", combined, re.IGNORECASE)
-        if runtime and cluster:
-            path, line = match_location(self.workflow_files, cluster)
-            self.add("WORKFLOW_IMAGE_SPLIT", "PASS", "流水线区分 runtime image 与 cluster image。", "无需整改。", path, line)
+
+        split_status, split_message, split_remediation, split_path, split_line = self.workflow_image_split_result(combined)
+        if split_status == "PASS":
+            self.add("WORKFLOW_IMAGE_SPLIT", "PASS", split_message, "无需整改。", split_path, split_line)
         else:
-            self.add("WORKFLOW_IMAGE_SPLIT", "FAIL", "流水线未明确区分 runtime image 与 cluster image。", "分别定义并构建 runtime image 与 cluster image。", self.workflow_files[0])
-        has_amd64 = "linux/amd64" in combined or re.search(r"\bamd64\b", combined)
-        has_arm64 = "linux/arm64" in combined or re.search(r"\barm64\b", combined)
-        has_manifest = re.search(r"docker\s+(?:buildx\s+imagetools|manifest)\s+create|platforms?\s*:", combined, re.IGNORECASE)
-        if has_amd64 and has_arm64 and has_manifest:
-            path, line = first_match(self.workflow_files, re.compile(r"amd64|arm64|imagetools|manifest|platforms?", re.IGNORECASE))
-            self.add("WORKFLOW_MULTI_ARCH", "PASS", "双架构检查通过：检测到 amd64/arm64 和 manifest/buildx 多架构入口。", "无需整改。", path, line)
+            self.add("WORKFLOW_IMAGE_SPLIT", "FAIL", split_message, split_remediation, split_path, split_line)
+
+        naming_status, naming_message, naming_remediation, naming_path, naming_line = self.workflow_image_naming_result(combined)
+        self.add("WORKFLOW_IMAGE_NAMING", naming_status, naming_message, naming_remediation, naming_path, naming_line)
+
+        has_amd64 = "linux/amd64" in combined or re.search(r"\barch:\s*amd64\b|\[\s*amd64", combined)
+        has_arm64 = "linux/arm64" in combined or re.search(r"\barch:\s*arm64\b|arm64\s*\]", combined)
+        runtime_manifest_hits, cluster_manifest_hits = self.workflow_artifact_context_hits(
+            re.compile(r"docker\s+(?:buildx\s+imagetools|manifest)\s+create", re.IGNORECASE)
+        )
+        runtime_buildx_hits, cluster_buildx_hits = self.workflow_artifact_context_hits(
+            re.compile(r"docker/build-push-action@|docker\s+buildx\s+build", re.IGNORECASE),
+            require_both_platforms=True,
+        )
+        runtime_multi_arch_hits = runtime_manifest_hits + runtime_buildx_hits
+        cluster_multi_arch_hits = cluster_manifest_hits + cluster_buildx_hits
+        if has_amd64 and has_arm64 and runtime_multi_arch_hits and cluster_multi_arch_hits:
+            manifest_multi_arch = bool(runtime_manifest_hits and cluster_manifest_hits)
+            buildx_multi_arch = bool(runtime_buildx_hits and cluster_buildx_hits)
+            evidence_hits = runtime_manifest_hits + cluster_manifest_hits if manifest_multi_arch else runtime_buildx_hits + cluster_buildx_hits
+            if manifest_multi_arch:
+                evidence = "manifest"
+            elif buildx_multi_arch:
+                evidence = "buildx"
+            else:
+                evidence = "manifest/buildx"
+            path, line, _ = evidence_hits[0]
+            self.add("WORKFLOW_MULTI_ARCH", "PASS", f"双架构检查通过：检测到 amd64/arm64，并通过 {evidence} 分别覆盖 runtime 与 cluster 多架构产物。", "无需整改。", path, line)
         else:
-            self.add("WORKFLOW_MULTI_ARCH", "FAIL", "未确认双架构产物：需要 amd64/arm64，并使用 manifest 或 buildx 覆盖多架构。", "增加 linux/amd64、linux/arm64 构建，并使用 docker manifest/buildx imagetools 或 buildx 多平台构建发布。", self.workflow_files[0])
-        cache = re.search(r"sealos\s+build\b|sealos\s+registry\s+save[\s\S]{0,320}--registry-dir[=\s\"']*registry|\bsreg\s+save\b", combined, re.IGNORECASE)
-        if cache:
-            path, line = match_location(self.workflow_files, cache)
-            self.add("WORKFLOW_IMAGE_CACHE", "PASS", "workflow 包含 cluster image 镜像缓存/构建入口。", "无需整改。", path, line)
+            self.add("WORKFLOW_MULTI_ARCH", "FAIL", "未确认双架构产物：需要 amd64/arm64，并分别覆盖 runtime 与 cluster 多架构发布。", "增加 linux/amd64、linux/arm64 构建，并使用 docker manifest/buildx imagetools 或 docker buildx 多平台构建发布 runtime 与 cluster 产物。", self.workflow_files[0])
+
+        registry_hits = search_paths(
+            self.workflow_files,
+            re.compile(
+                r"sealos\s+registry\s+save[\s\S]{0,320}--registry-dir(?:=|\s+)\"?registry\"?[\s\S]{0,320}--arch|"
+                r"sealos\s+registry\s+save[\s\S]{0,320}--arch[\s\S]{0,320}--registry-dir(?:=|\s+)\"?registry\"?|"
+                r"\bsreg\s+save\b",
+                re.IGNORECASE,
+            ),
+        )
+        sealos_build_hits = search_paths(self.workflow_files, re.compile(r"\bsealos\s+build\b", re.IGNORECASE))
+        if registry_hits:
+            path, line, _ = registry_hits[0]
+            self.add("WORKFLOW_IMAGE_CACHE", "PASS", "cluster image 构建前执行 sealos registry save 或 sreg save。", "无需整改。", path, line)
+        elif sealos_build_hits:
+            path, line, _ = sealos_build_hits[0]
+            self.add("WORKFLOW_IMAGE_CACHE", "PASS", "workflow 使用 sealos build 构建 cluster image，可作为镜像缓存/集群镜像构建入口。", "无需整改。", path, line)
         else:
             self.add("WORKFLOW_IMAGE_CACHE", "FAIL", "流水线缺少 cluster image 镜像缓存入口。", "在 cluster image 构建前执行 sealos build、sealos registry save --registry-dir=registry --arch <arch> . 或 sreg save。", self.workflow_files[0])
         size_hit = first_match(self.workflow_files, SIZE_PATTERN)
@@ -245,6 +297,123 @@ class Checker:
             if not oss_md5_upload:
                 missing.append(".md5 OSS 上传")
             self.add("WORKFLOW_OSS_SYNC", "FAIL", "流水线未完整包含强制 OSS 同步：" + "、".join(missing) + "。", "导出 cluster tar/tar.gz、生成 md5，并使用 ossutil cp 分别上传 tar/tar.gz 和 .md5 到 OSS。", self.workflow_files[0])
+
+    def workflow_image_split_result(self, combined: str) -> tuple[str, str, str, Path, int | None]:
+        recommended_runtime = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}/\$\{\{\s*github\.repository\s*\}\}(?!-cluster)", combined)
+        recommended_cluster = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}/\$\{\{\s*github\.repository\s*\}\}-cluster", combined)
+        legacy_runtime = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}(?!-cluster)(?=[:\"'@\s]|$)", combined)
+        legacy_cluster = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}-cluster", combined)
+
+        if legacy_runtime or legacy_cluster:
+            path, line = self.workflow_match_location(legacy_cluster or legacy_runtime)
+            return (
+                "FAIL",
+                "流水线使用已禁止的兼容镜像命名格式 ghcr.io/${{ github.repository }} 或 ghcr.io/${{ github.repository }}-cluster。",
+                "改为推荐格式：runtime 使用 ghcr.io/${{ github.repository }}/${{ github.repository }}，cluster 使用 ghcr.io/${{ github.repository }}/${{ github.repository }}-cluster。",
+                path,
+                line,
+            )
+        if recommended_runtime and recommended_cluster:
+            path, line = self.workflow_match_location(recommended_cluster)
+            return (
+                "PASS",
+                "流水线区分 runtime image 与 cluster image，且使用推荐镜像命名格式 ghcr.io/${{ github.repository }}/${{ github.repository }} 与 -cluster。",
+                "无需整改。",
+                path,
+                line,
+            )
+
+        runtime_image = re.search(r"RUNTIME_IMAGE|GHCR_RUNTIME_IMAGE|runtime image|frontend|backend", combined, re.IGNORECASE)
+        cluster_image = re.search(r"ghcr\.io/[^\s\"']+-cluster|SEALOS_IMAGE|GHCR_SEALOS_IMAGE|CLUSTER_IMAGE|cluster image|sealos image|-cluster", combined, re.IGNORECASE)
+        if runtime_image and cluster_image:
+            path, line = self.workflow_match_location(cluster_image)
+            return (
+                "PASS",
+                "流水线区分 runtime image 与 cluster image。",
+                "无需整改。",
+                path,
+                line,
+            )
+        path, line = self.workflow_match_location(cluster_image or runtime_image)
+        return (
+            "FAIL",
+            "流水线未明确区分 runtime image 与 cluster image。",
+            "分别定义并构建 runtime image 与 cluster image；推荐使用 ghcr.io/${{ github.repository }}/${{ github.repository }} 与 ghcr.io/${{ github.repository }}/${{ github.repository }}-cluster。",
+            path,
+            line,
+        )
+
+    def workflow_image_naming_result(self, combined: str) -> tuple[str, str, str, Path, int | None]:
+        recommended_runtime = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}/\$\{\{\s*github\.repository\s*\}\}(?!-cluster)", combined)
+        recommended_cluster = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}/\$\{\{\s*github\.repository\s*\}\}-cluster", combined)
+        legacy_runtime = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}(?!-cluster)(?=[:\"'@\s]|$)", combined)
+        legacy_cluster = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}-cluster", combined)
+        if legacy_runtime or legacy_cluster:
+            path, line = self.workflow_match_location(legacy_cluster or legacy_runtime)
+            return (
+                "FAIL",
+                "流水线使用禁止的 GHCR 镜像命名格式 ghcr.io/${{ github.repository }} 或 ghcr.io/${{ github.repository }}-cluster。",
+                "改为 ghcr.io/${{ github.repository }}/${{ github.repository }} 和 ghcr.io/${{ github.repository }}/${{ github.repository }}-cluster，保持 runtime 与 cluster package 可区分。",
+                path,
+                line,
+            )
+        if recommended_runtime and recommended_cluster:
+            path, line = self.workflow_match_location(recommended_cluster)
+            return (
+                "PASS",
+                "流水线使用推荐的公开 GHCR 镜像命名格式。",
+                "无需整改。",
+                path,
+                line,
+            )
+        return (
+            "PASS",
+            "未发现禁止的 GHCR 镜像命名格式。",
+            "如使用 github.repository 动态命名，建议采用 ghcr.io/${{ github.repository }}/${{ github.repository }} 和 -cluster 嵌套格式。",
+            self.workflow_files[0],
+            None,
+        )
+
+    def workflow_match_location(self, match: re.Match[str] | None) -> tuple[Path, int | None]:
+        if not match:
+            return self.workflow_files[0], None
+        path, line = match_location(self.workflow_files, match)
+        return path or self.workflow_files[0], line
+
+    def workflow_artifact_context_hits(
+        self,
+        create_pattern: re.Pattern[str],
+        require_both_platforms: bool = False,
+    ) -> tuple[list[tuple[Path, int, str]], list[tuple[Path, int, str]]]:
+        runtime_hits = []
+        cluster_hits = []
+        runtime_pattern = re.compile(r"RUNTIME|runtime|backend|frontend|ghcr\.io/[^\s\"']+(?<!-cluster)(?=[:@\s]|$)", re.IGNORECASE)
+        cluster_pattern = re.compile(r"SEALOS|CLUSTER|cluster|-cluster", re.IGNORECASE)
+        for path in self.workflow_files:
+            lines = read_text(path).splitlines()
+            for index, line in enumerate(lines, start=1):
+                if not create_pattern.search(line):
+                    continue
+                command_context = workflow_command_context(lines, index - 1)
+                if require_both_platforms and not context_has_both_platforms(command_context):
+                    command_context = ""
+                if command_context and cluster_pattern.search(command_context):
+                    cluster_hits.append((path, index, command_context))
+                    continue
+                if command_context and runtime_pattern.search(command_context):
+                    runtime_hits.append((path, index, command_context))
+                    continue
+
+                step_context = workflow_step_context(lines, index - 1)
+                if require_both_platforms and not context_has_both_platforms(step_context):
+                    continue
+                has_cluster = bool(cluster_pattern.search(step_context))
+                has_runtime = bool(runtime_pattern.search(step_context))
+                if has_cluster and not has_runtime:
+                    cluster_hits.append((path, index, step_context))
+                elif has_runtime and not has_cluster:
+                    runtime_hits.append((path, index, step_context))
+        return runtime_hits, cluster_hits
 
     def check_values_strategy(self) -> None:
         if not self.entrypoint_files:
@@ -324,28 +493,60 @@ class Checker:
             self.add("TOOLS_FUNCTION_DEPENDENCY", "N/A", "entrypoint/install 未使用 tools.sh 覆盖的平台配置能力，规则未触发。", "无需整改。")
 
     def check_global_http(self) -> None:
-        files = list(self.deploy_text_files())
-        if not files:
-            return
-        text = "\n".join(read_text(path) for path in files)
-        needed = ["cloudDomain", "cloudPort", "httpPort", "disableHttps", "certSecretName"]
-        missing = [name for name in needed if name not in text and "global_http_" not in text]
-        if missing:
-            self.add("GLOBAL_HTTP_CONFIG", "FAIL", "未完整读取/声明 global.http 参数：" + ", ".join(missing) + "。", "读取 cloudDomain、cloudPort、httpPort、disableHttps、certSecretName，或使用 global_http_* helper。", files[0])
+        value_names = ["cloudDomain", "cloudPort", "httpPort", "disableHttps", "certSecretName"]
+        script_text = "\n".join(read_text(path) for path in self.entrypoint_files)
+        values_text = "\n".join(read_text(chart / "values.yaml") for chart in self.chart_dirs if (chart / "values.yaml").is_file())
+        helper_http = self.uses_global_http_helpers(script_text)
+
+        missing_script = [] if helper_http else [name for name in value_names if name not in script_text]
+        missing_values = [] if helper_http else [name for name in value_names if re.search(rf"(?m)^\s*{re.escape(name)}\s*:", values_text) is None]
+
+        if missing_script:
+            self.add("GLOBAL_HTTP_ENTRYPOINT", "FAIL", "entrypoint 未读取/传入 global.http 相关参数：" + ", ".join(missing_script) + "。", "从 sealos-config 读取 cloudDomain、cloudPort、httpPort、disableHttps、certSecretName，并通过 --set-string 传给 Helm；也可以使用 global_http_disable_https/global_http_external_url helper。", self.entrypoint_files[0] if self.entrypoint_files else self.deploy_dir)
         else:
-            path, line = first_match(files, re.compile(r"disableHttps|global_http_|cloudDomain|httpPort"))
-            self.add("GLOBAL_HTTP_CONFIG", "PASS", "已读取/声明 global.http 相关参数。", "无需整改。", path, line)
+            hits = search_paths(self.entrypoint_files, re.compile(r"global_http_disable_https|global_http_external_url|disableHttps|certSecretName|httpPort"))
+            path, line = (hits[0][0], hits[0][1]) if hits else (self.entrypoint_files[0] if self.entrypoint_files else self.deploy_dir, None)
+            message = "entrypoint 通过全局 HTTP helper 读取并传递 HTTP/HTTPS 参数。" if helper_http else "entrypoint 读取 global.http 所需参数。"
+            self.add("GLOBAL_HTTP_ENTRYPOINT", "PASS", message, "无需整改。", path, line)
+
+        if missing_values:
+            self.add("GLOBAL_HTTP_VALUES", "FAIL", "values.yaml 未声明 global.http 所需参数：" + ", ".join(missing_values) + "。", "在 chart values 中提供 cloudDomain、cloudPort、httpPort、disableHttps、certSecretName 默认值。", self.chart_dirs[0] / "values.yaml" if self.chart_dirs else self.deploy_dir)
+        else:
+            path = self.chart_dirs[0] / "values.yaml" if self.chart_dirs else self.deploy_dir
+            message = "entrypoint 使用全局 HTTP helper，chart 通过 helper 结果/Helm override 接收 HTTP/HTTPS 模式。" if helper_http else "values.yaml 声明 global.http 所需参数。"
+            self.add("GLOBAL_HTTP_VALUES", "PASS", message, "无需整改。", path, 1 if path.is_file() else None)
+
         hardcoded = []
         for path in self.template_files():
             for line_no, line in iter_lines(path):
-                lower = line.lower()
-                if ("https://" in lower or re.search(r":443\b", lower)) and ".svc" not in lower and "github.com" not in lower and "sealos.run" not in lower:
-                    hardcoded.append((path, line_no))
+                if "https://" in line or re.search(r":443\b", line):
+                    if line_is_helper_or_example(self.rel(path), line):
+                        continue
+                    if self.is_external_template_line(line):
+                        hardcoded.append((path, line_no))
         if hardcoded:
             path, line = hardcoded[0]
-            self.add("GLOBAL_HTTP_HARDCODED_EXTERNAL_URL", "FAIL", "模板存在硬编码外部 https:// 或 :443。", "根据 disableHttps 切换协议、端口和 Ingress TLS。", path, line)
+            self.add("GLOBAL_HTTP_HARDCODED_EXTERNAL_URL", "FAIL", f"模板存在硬编码外部 https:// 或 :443，共 {len(hardcoded)} 处。", "使用协议/端口 helper，根据 disableHttps 输出 http:// 或 https://，HTTP 模式下删除 :443 或改为 :80。", path, line)
         else:
             self.add("GLOBAL_HTTP_HARDCODED_EXTERNAL_URL", "PASS", "未发现模板硬编码外部 https:// 或 :443。", "无需整改。", self.chart_dirs[0] if self.chart_dirs else self.deploy_dir)
+
+        tls_unconditional = []
+        cert_hardcoded = []
+        for path in self.template_files():
+            if not is_ingress_template(path):
+                continue
+            for line_no, line in iter_lines(path):
+                if re.match(r"\s*tls\s*:", line) and not nearby_has_template_if(path, line_no):
+                    tls_unconditional.append((path, line_no))
+                if "secretName:" in line and "certSecretName" not in line and ".Values" not in line:
+                    cert_hardcoded.append((path, line_no))
+        if tls_unconditional or cert_hardcoded:
+            path, line = (tls_unconditional or cert_hardcoded)[0]
+            self.add("GLOBAL_HTTP_INGRESS_TLS", "FAIL", "Ingress TLS 或证书引用未按 disableHttps/certSecretName 条件化。", "disableHttps=true 时不生成 tls；disableHttps=false 时生成 tls，secretName 使用 .Values.certSecretName。", path, line)
+        else:
+            self.add("GLOBAL_HTTP_INGRESS_TLS", "PASS", "Ingress TLS/证书逻辑已条件化或未发现 TLS。", "无需整改。", self.chart_dirs[0] if self.chart_dirs else self.deploy_dir)
+
+        self.check_helm_template_http_mode()
 
     def check_node_tls(self) -> None:
         files = list(self.deploy_text_files())
@@ -353,22 +554,110 @@ class Checker:
         if not signal:
             self.add("NODE_TLS_REJECT_UNAUTHORIZED", "N/A", "未检测到 Node/前端运行环境特征，跳过 Node TLS 检查。", "无需整改。")
             return
-        text = "\n".join(read_text(path) for path in files)
+        template_files = list(self.template_files())
+        template_text = "\n".join(read_text(path) for path in template_files)
+        values_text = "\n".join(read_text(chart / "values.yaml") for chart in self.chart_dirs if (chart / "values.yaml").is_file())
+        script_text = "\n".join(read_text(path) for path in self.entrypoint_files)
         missing = []
-        if "NODE_TLS_REJECT_UNAUTHORIZED" not in text:
-            missing.append("NODE_TLS_REJECT_UNAUTHORIZED")
-        if "tlsRejectUnauthorized" not in text:
-            missing.append("platform.tlsRejectUnauthorized")
-        uses_tls_helper = "read_cert_tls_reject_unauthorized" in text
-        if not uses_tls_helper and ("CERT_MODE" not in text or "cert-config" not in text):
-            missing.append("从 cert-config 读取 CERT_MODE")
-        if "--set-string" not in text or "platform.tlsRejectUnauthorized" not in text:
+        if "NODE_TLS_REJECT_UNAUTHORIZED" not in template_text:
+            missing.append("容器环境变量 NODE_TLS_REJECT_UNAUTHORIZED")
+        if not re.search(r"NODE_TLS_REJECT_UNAUTHORIZED[\s\S]{0,160}\.Values\.platform\.tlsRejectUnauthorized", template_text):
+            missing.append("NODE_TLS_REJECT_UNAUTHORIZED 使用 .Values.platform.tlsRejectUnauthorized")
+        if not re.search(r"(?m)^\s*platform\s*:[\s\S]*?^\s{2,}tlsRejectUnauthorized\s*:\s*[\"']?1[\"']?", values_text):
+            missing.append('values.yaml 默认 platform.tlsRejectUnauthorized: "1"')
+        if "read_cert_tls_reject_unauthorized" not in script_text and not re.search(r"cert-config[\s\S]{0,240}CERT_MODE|CERT_MODE[\s\S]{0,240}cert-config", script_text):
+            missing.append("entrypoint/install 从 sealos-system/cert-config 读取 CERT_MODE")
+        if "read_cert_tls_reject_unauthorized" not in script_text and not re.search(r"https\|acme[\s\S]{0,120}(?:printf|echo)\s+['\"]0['\"]|(?:printf|echo)\s+['\"]0['\"][\s\S]{0,120}https\|acme", script_text):
+            missing.append("CERT_MODE=https|acme 时 tlsRejectUnauthorized=0")
+        if "read_cert_tls_reject_unauthorized" not in script_text and not re.search(r"(?:printf|echo)\s+['\"]1['\"]|tlsRejectUnauthorized[^\n]*1", script_text):
+            missing.append("其它证书模式默认 tlsRejectUnauthorized=1")
+        if not re.search(r"--set-string\s+[\"']?platform\.tlsRejectUnauthorized=", script_text):
             missing.append("Helm --set-string platform.tlsRejectUnauthorized")
         path, line, _ = signal[0]
         if missing:
-            self.add("NODE_TLS_REJECT_UNAUTHORIZED", "FAIL", "检测到 Node/前端运行环境，但 Node TLS 支持不完整：缺少 " + "、".join(missing) + "。", "从 sealos-system/cert-config 读取 CERT_MODE，https/acme 时传 0，其它模式传 1，并注入 NODE_TLS_REJECT_UNAUTHORIZED。", path, line)
+            self.add("NODE_TLS_REJECT_UNAUTHORIZED", "FAIL", "检测到 Node/前端运行环境，但 NODE_TLS_REJECT_UNAUTHORIZED 支持不完整：缺少 " + "、".join(missing) + "。", "从 sealos-system/cert-config 读取 CERT_MODE；CERT_MODE=https|acme 时传 platform.tlsRejectUnauthorized=0，其它模式传 1；values.yaml 默认 platform.tlsRejectUnauthorized: \"1\"；前端容器注入 NODE_TLS_REJECT_UNAUTHORIZED={{ .Values.platform.tlsRejectUnauthorized }}。", path, line)
         else:
             self.add("NODE_TLS_REJECT_UNAUTHORIZED", "PASS", "Node/前端运行环境已按证书模式支持 NODE_TLS_REJECT_UNAUTHORIZED。", "无需整改。", path, line)
+
+    def uses_global_http_helpers(self, text: str) -> bool:
+        return bool(
+            re.search(r"source\s+['\"]?/root/\.sealos/cloud/scripts/tools\.sh|global_http_disable_https|global_http_external_url", text)
+            and re.search(r"global_http_disable_https", text)
+            and re.search(r"global_http_external_url", text)
+        )
+
+    def is_external_template_line(self, line: str) -> bool:
+        lower = line.lower()
+        if ".svc" in lower or "cluster.local" in lower or "github.com" in lower:
+            return False
+        return bool(re.search(r"url|host|origin|domain|callback|redirect|ingress|tls|cors|csp|icon|public", lower) or "https://" in lower)
+
+    def check_helm_template_http_mode(self) -> None:
+        if not self.chart_dirs:
+            return
+        helm_bin = shutil.which("helm")
+        if not helm_bin:
+            self.add("GLOBAL_HTTP_HELM_TEMPLATE", "WARN", "未安装 helm，跳过 HTTP/HTTPS 双模式渲染验证。", "安装 helm 后运行检测器，或手动执行 helm template 验证 disableHttps=true/false。", self.chart_dirs[0])
+            return
+        for chart in self.chart_dirs:
+            cmd = [helm_bin, "template", "sealos-app-check", str(chart)]
+            cmd.extend(self.http_mode_helm_args(chart))
+            result = subprocess.run(cmd, cwd=self.root, text=True, capture_output=True, check=False)
+            if result.returncode != 0:
+                self.add("GLOBAL_HTTP_HELM_TEMPLATE", "WARN", f"helm template 执行失败：{result.stderr.strip() or result.stdout.strip()}", "修复 chart 渲染错误后重新验证 HTTP/HTTPS 双模式。", chart)
+                continue
+            rendered = result.stdout
+            bad_https = [line for line in rendered.splitlines() if "https://" in line and is_external_rendered_line(line)]
+            bad_443 = [line for line in rendered.splitlines() if re.search(r":443\b", line) and is_external_rendered_line(line)]
+            bad_tls = rendered_has_ingress_tls(rendered)
+            if bad_https or bad_443 or bad_tls:
+                parts = []
+                if bad_https:
+                    parts.append(f"HTTP 模式仍包含外部 https:// {len(bad_https)} 处")
+                if bad_443:
+                    parts.append(f"HTTP 模式仍包含外部 :443 {len(bad_443)} 处")
+                if bad_tls:
+                    parts.append("HTTP 模式仍生成 tls")
+                self.add("GLOBAL_HTTP_HELM_TEMPLATE", "FAIL", "；".join(parts) + "。", "让模板基于 disableHttps 切换协议、端口和 TLS；HTTP 模式输出不得残留外部 https://、:443 或无条件 tls。", chart)
+            else:
+                self.add("GLOBAL_HTTP_HELM_TEMPLATE", "PASS", f"{self.rel(chart)} HTTP 模式渲染通过。", "无需整改。", chart)
+
+    def http_mode_helm_args(self, chart: Path) -> list[str]:
+        values_text = read_text(chart / "values.yaml") if (chart / "values.yaml").is_file() else ""
+        args = [
+            "--set",
+            "disableHttps=true",
+            "--set",
+            "httpPort=80",
+            "--set",
+            "cloudPort=443",
+            "--set",
+            "cloudDomain=example.test",
+            "--set",
+            "certSecretName=test-cert",
+        ]
+        if "global:" in values_text and "clusterDomain:" in values_text:
+            args.extend(["--set-string", "global.clusterDomain=example.test"])
+        if "ingress:" in values_text and "tls:" in values_text and "enabled:" in values_text:
+            args.extend(["--set", "ingress.tls.enabled=false", "--set-string", "ingress.sslRedirect=false"])
+        if "frontend:" in values_text and "ingress:" in values_text:
+            args.extend(
+                [
+                    "--set-string",
+                    "app.urlScheme=http",
+                    "--set",
+                    "frontend.ingress.tls=",
+                    "--set-string",
+                    "frontend.ingress.hosts[0].host=registry.example.test",
+                    "--set-string",
+                    "frontend.ingress.hosts[0].paths[0].path=/",
+                    "--set-string",
+                    "frontend.ingress.hosts[0].paths[0].pathType=Prefix",
+                    "--set-string",
+                    "frontend.ingress.annotations.nginx\\.ingress\\.kubernetes\\.io/ssl-redirect=false",
+                ]
+            )
+        return args
 
     def check_database(self) -> None:
         files = list(self.deploy_text_files())
@@ -458,6 +747,92 @@ def match_location(paths: Iterable[Path], match: re.Match[str]) -> tuple[Path | 
             return path, text.count("\n", 0, match.start() - offset) + 1
         offset = next_offset
     return None, None
+
+
+def nearby_has_template_if(path: Path, line_no: int) -> bool:
+    lines = read_text(path).splitlines()
+    start = max(0, line_no - 5)
+    end = min(len(lines), line_no + 2)
+    return any("{{" in line and ("if" in line or "with" in line) for line in lines[start:end])
+
+
+def is_ingress_template(path: Path) -> bool:
+    text = read_text(path)
+    return bool(re.search(r"(?m)^\s*kind\s*:\s*Ingress\s*$", text) or re.search(r"networking\.k8s\.io/.+Ingress", text))
+
+
+def line_is_helper_or_example(rel_path: str, line: str) -> bool:
+    lower = line.lower()
+    if rel_path.lower().endswith(("notes.txt", "readme.md")):
+        return True
+    if "global_http_external_url" in lower:
+        return True
+    if "default" in lower and "printf" in lower and "://" in lower:
+        return True
+    if "urlscheme" in lower:
+        return True
+    return False
+
+
+def workflow_command_context(lines: list[str], index: int) -> str:
+    context = [lines[index]]
+    previous = lines[index].rstrip()
+    for next_line in lines[index + 1 :]:
+        if not previous.endswith("\\"):
+            break
+        stripped = next_line.strip()
+        if not stripped:
+            break
+        context.append(next_line)
+        previous = next_line.rstrip()
+        if len(context) >= 8:
+            break
+    return "\n".join(context)
+
+
+def workflow_step_context(lines: list[str], index: int) -> str:
+    start = index
+    while start > 0 and not re.match(r"\s*-\s+(?:name|run|uses|working-directory)\s*:", lines[start]):
+        start -= 1
+    end = index + 1
+    while end < len(lines) and not re.match(r"\s*-\s+(?:name|run|uses|working-directory)\s*:", lines[end]):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def context_has_both_platforms(context: str) -> bool:
+    return bool(
+        ("linux/amd64" in context or re.search(r"\bamd64\b", context))
+        and ("linux/arm64" in context or re.search(r"\barm64\b", context))
+    )
+
+
+def is_external_rendered_line(line: str) -> bool:
+    lower = line.lower()
+    if ".svc" in lower or "cluster.local" in lower or "github.com" in lower:
+        return False
+    return bool(re.search(r"url|host|origin|domain|callback|redirect|ingress|tls|cors|csp|icon|public", lower) or "https://" in lower)
+
+
+def rendered_has_ingress_tls(rendered: str) -> bool:
+    in_ingress = False
+    ingress_indent = 0
+    for line in rendered.splitlines():
+        if re.match(r"^\s*kind:\s*Ingress\s*$", line):
+            in_ingress = True
+            ingress_indent = 0
+            continue
+        if in_ingress and re.match(r"^---\s*$", line):
+            in_ingress = False
+            continue
+        if in_ingress and re.match(r"^\s*spec:\s*$", line):
+            ingress_indent = len(line) - len(line.lstrip())
+            continue
+        if in_ingress and re.match(r"^\s*tls:\s*$", line):
+            indent = len(line) - len(line.lstrip())
+            if indent >= ingress_indent:
+                return True
+    return False
 
 
 def load_tools_catalog() -> set[str]:
