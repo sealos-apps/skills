@@ -222,6 +222,7 @@ class Checker:
             self.add("WORKFLOW_EXISTS", "FAIL", "缺少 .github/workflows 下的构建流水线。", "新增 GitHub Actions 流水线，覆盖 runtime image、cluster image、manifest、tar/md5 和 OSS 同步。", self.workflow_dir)
             return
         combined = "\n".join(read_text(path) for path in self.workflow_files)
+        workflow_code = strip_workflow_comments(combined)
 
         split_status, split_message, split_remediation, split_path, split_line = self.workflow_image_split_result(combined)
         if split_status == "PASS":
@@ -232,17 +233,22 @@ class Checker:
         naming_status, naming_message, naming_remediation, naming_path, naming_line = self.workflow_image_naming_result(combined)
         self.add("WORKFLOW_IMAGE_NAMING", naming_status, naming_message, naming_remediation, naming_path, naming_line)
 
-        has_amd64 = "linux/amd64" in combined or re.search(r"\barch:\s*amd64\b|\[\s*amd64", combined)
-        has_arm64 = "linux/arm64" in combined or re.search(r"\barch:\s*arm64\b|arm64\s*\]", combined)
+        architectures = workflow_architectures(workflow_code)
+        has_amd64 = "amd64" in architectures
+        has_arm64 = "arm64" in architectures
         runtime_manifest_hits, cluster_manifest_hits = self.workflow_artifact_context_hits(
             re.compile(r"docker\s+(?:buildx\s+imagetools|manifest)\s+create", re.IGNORECASE)
         )
         runtime_buildx_hits, cluster_buildx_hits = self.workflow_artifact_context_hits(
             re.compile(r"docker/build-push-action@|docker\s+buildx\s+build", re.IGNORECASE),
-            require_both_platforms=True,
         )
-        runtime_multi_arch_hits = runtime_manifest_hits + runtime_buildx_hits
-        cluster_multi_arch_hits = cluster_manifest_hits + cluster_buildx_hits
+        runtime_buildx_arches, cluster_buildx_arches = self.workflow_artifact_architectures(
+            re.compile(r"docker/build-push-action@|docker\s+buildx\s+build", re.IGNORECASE),
+        )
+        runtime_buildx_multi_arch = {"amd64", "arm64"} <= runtime_buildx_arches
+        cluster_buildx_multi_arch = {"amd64", "arm64"} <= cluster_buildx_arches
+        runtime_multi_arch_hits = runtime_manifest_hits + (runtime_buildx_hits if runtime_buildx_multi_arch else [])
+        cluster_multi_arch_hits = cluster_manifest_hits + (cluster_buildx_hits if cluster_buildx_multi_arch else [])
         if has_amd64 and has_arm64 and runtime_multi_arch_hits and cluster_multi_arch_hits:
             manifest_multi_arch = bool(runtime_manifest_hits and cluster_manifest_hits)
             buildx_multi_arch = bool(runtime_buildx_hits and cluster_buildx_hits)
@@ -281,20 +287,20 @@ class Checker:
             self.add("WORKFLOW_IMAGE_SIZE_REPORT", "PASS", "流水线输出镜像或 tar 包大小信息。", "无需整改。", size_hit[0], size_hit[1])
         else:
             self.add("WORKFLOW_IMAGE_SIZE_REPORT", "FAIL", "流水线缺少镜像/产物大小输出步骤。", "增加 docker image inspect、docker images、docker buildx imagetools inspect、du -h、ls -lh、stat 或 wc -c 等大小输出。", self.workflow_files[0])
-        oss_tar_upload = re.search(r"\bossutil(?:64)?\s+cp\b[^\n]*\.tar(?:\.gz)?[^\n]*oss://", combined, re.IGNORECASE)
-        oss_md5_upload = re.search(r"\bossutil(?:64)?\s+cp\b[^\n]*\.md5[^\n]*oss://", combined, re.IGNORECASE)
-        md5_generated = re.search(r"\bmd5sum\b[^\n]*\.tar(?:\.gz)?[^\n]*(?:>|tee)[^\n]*\.md5|\.tar(?:\.gz)?\.md5", combined, re.IGNORECASE)
-        oss_ok = bool(oss_tar_upload and oss_md5_upload and md5_generated)
+        oss_state = workflow_oss_state(workflow_code)
+        oss_ok = all(oss_state.values())
         if oss_ok:
             path, line = first_match(self.workflow_files, re.compile(r"\bossutil(?:64)?\s+cp\b", re.IGNORECASE))
             self.add("WORKFLOW_OSS_SYNC", "PASS", "流水线包含 cluster tar/tar.gz、md5 和 OSS 推送。", "无需整改。", path, line)
         else:
             missing = []
-            if not oss_tar_upload:
+            if not oss_state["archive_source"]:
+                missing.append("tar/tar.gz 产物来源")
+            if not oss_state["archive_upload"]:
                 missing.append("tar/tar.gz OSS 上传")
-            if not md5_generated:
+            if not oss_state["md5_generated"]:
                 missing.append("md5 生成")
-            if not oss_md5_upload:
+            if not oss_state["md5_upload"]:
                 missing.append(".md5 OSS 上传")
             self.add("WORKFLOW_OSS_SYNC", "FAIL", "流水线未完整包含强制 OSS 同步：" + "、".join(missing) + "。", "导出 cluster tar/tar.gz、生成 md5，并使用 ossutil cp 分别上传 tar/tar.gz 和 .md5 到 OSS。", self.workflow_files[0])
 
@@ -390,7 +396,7 @@ class Checker:
         runtime_pattern = re.compile(r"RUNTIME|runtime|backend|frontend|ghcr\.io/[^\s\"']+(?<!-cluster)(?=[:@\s]|$)", re.IGNORECASE)
         cluster_pattern = re.compile(r"SEALOS|CLUSTER|cluster|-cluster", re.IGNORECASE)
         for path in self.workflow_files:
-            lines = read_text(path).splitlines()
+            lines = strip_workflow_comments(read_text(path)).splitlines()
             for index, line in enumerate(lines, start=1):
                 if not create_pattern.search(line):
                     continue
@@ -405,7 +411,9 @@ class Checker:
                     continue
 
                 step_context = workflow_step_context(lines, index - 1)
-                if require_both_platforms and not context_has_both_platforms(step_context):
+                job_context = workflow_job_context(lines, index - 1)
+                platform_context = "\n".join((command_context, step_context, job_context))
+                if require_both_platforms and not context_has_both_platforms(platform_context):
                     continue
                 has_cluster = bool(cluster_pattern.search(step_context))
                 has_runtime = bool(runtime_pattern.search(step_context))
@@ -414,6 +422,32 @@ class Checker:
                 elif has_runtime and not has_cluster:
                     runtime_hits.append((path, index, step_context))
         return runtime_hits, cluster_hits
+
+    def workflow_artifact_architectures(
+        self,
+        create_pattern: re.Pattern[str],
+    ) -> tuple[set[str], set[str]]:
+        runtime_architectures: set[str] = set()
+        cluster_architectures: set[str] = set()
+        runtime_pattern = re.compile(r"RUNTIME|runtime|backend|frontend|ghcr\.io/[^\s\"']+(?<!-cluster)(?=[:@\s]|$)", re.IGNORECASE)
+        cluster_pattern = re.compile(r"SEALOS|CLUSTER|cluster|-cluster", re.IGNORECASE)
+        for path in self.workflow_files:
+            lines = strip_workflow_comments(read_text(path)).splitlines()
+            for index, line in enumerate(lines, start=1):
+                if not create_pattern.search(line):
+                    continue
+                command_context = workflow_command_context(lines, index - 1)
+                step_context = workflow_step_context(lines, index - 1)
+                artifact_context = "\n".join((command_context, step_context))
+                job_context = workflow_job_context(lines, index - 1)
+                architectures = workflow_architectures(
+                    "\n".join((command_context, step_context, job_context))
+                )
+                if cluster_pattern.search(artifact_context) and not runtime_pattern.search(artifact_context):
+                    cluster_architectures.update(architectures)
+                elif runtime_pattern.search(artifact_context) and not cluster_pattern.search(artifact_context):
+                    runtime_architectures.update(architectures)
+        return runtime_architectures, cluster_architectures
 
     def check_values_strategy(self) -> None:
         if not self.entrypoint_files:
@@ -738,6 +772,129 @@ def first_match(paths: Iterable[Path], pattern: re.Pattern[str]) -> tuple[Path |
     return hits[0][0], hits[0][1]
 
 
+def strip_workflow_comments(text: str) -> str:
+    """Drop YAML and shell comments while preserving workflow line numbers."""
+    cleaned = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            cleaned.append("")
+            continue
+        quote = None
+        cut_at = None
+        for index, character in enumerate(line):
+            if character in {"\"", "'"}:
+                if quote == character:
+                    quote = None
+                elif quote is None:
+                    quote = character
+            elif character == "#" and quote is None and (index == 0 or line[index - 1].isspace()):
+                cut_at = index
+                break
+        cleaned.append(line[:cut_at] if cut_at is not None else line)
+    return "\n".join(cleaned)
+
+
+def workflow_architectures(text: str) -> set[str]:
+    """Return architectures explicitly evidenced by workflow syntax or runner names."""
+    architectures: set[str] = set()
+    signals = {
+        "amd64": [
+            r"\blinux\s*/\s*amd64\b",
+            r"\b(?:arch|ARCH|targetarch|TARGETARCH)\s*[:=]\s*[\"']?amd64\b",
+            r"\bruns-on\s*:\s*ubuntu-24\.04(?:\s|$)",
+            r"\bmatrix\s*:[\s\S]{0,240}?\barch\s*:\s*\[[^\]]*\bamd64\b",
+        ],
+        "arm64": [
+            r"\blinux\s*/\s*arm64\b",
+            r"\b(?:arch|ARCH|targetarch|TARGETARCH)\s*[:=]\s*[\"']?arm64\b",
+            r"\bruns-on\s*:\s*ubuntu-24\.04-arm\b",
+            r"\bmatrix\s*:[\s\S]{0,240}?\barch\s*:\s*\[[^\]]*\barm64\b",
+        ],
+    }
+    for architecture, patterns in signals.items():
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+            architectures.add(architecture)
+    return architectures
+
+
+def workflow_oss_state(text: str) -> dict[str, bool]:
+    """Check common tar/md5 OSS flows without attempting to parse all of shell."""
+    archive_pattern = r"\.(?:tar\.gz|tar)(?![A-Za-z.])"
+    code_lines = text.splitlines()
+    command_lines = [
+        line
+        for line in code_lines
+        if not re.match(r"\s*(?:-\s*)?name\s*:", line, re.IGNORECASE)
+    ]
+    archive_source = any(re.search(archive_pattern, line, re.IGNORECASE) for line in command_lines)
+    md5_lines = [
+        line
+        for line in command_lines
+        if re.search(r"(?:^\s*|\brun:\s+)(?:md5sum|md5)\s+", line, re.IGNORECASE)
+    ]
+    md5_generated = bool(
+        md5_lines
+        and archive_source
+        and any(re.search(r"\.md5\b", line, re.IGNORECASE) for line in command_lines)
+        and any(
+            re.search(r"(?:>|tee\b)", line, re.IGNORECASE)
+            or re.search(r"\.md5\b", line, re.IGNORECASE)
+            for line in md5_lines
+        )
+    )
+
+    archive_arrays: set[str] = set()
+    checksum_arrays: set[str] = set()
+    array_pattern = re.compile(r"(?ms)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)")
+    for match in array_pattern.finditer(text):
+        name, body = match.groups()
+        if re.search(archive_pattern, body, re.IGNORECASE):
+            archive_arrays.add(name)
+        if re.search(r"\.md5\b", body, re.IGNORECASE):
+            checksum_arrays.add(name)
+
+    archive_upload = bool(
+        any(
+            re.search(rf"\bossutil(?:64)?\s+cp\b[^\n]*{archive_pattern}[^\n]*oss://", line, re.IGNORECASE)
+            for line in command_lines
+        )
+    )
+    md5_upload = bool(
+        any(
+            re.search(r"\bossutil(?:64)?\s+cp\b[^\n]*\.md5\b[^\n]*oss://", line, re.IGNORECASE)
+            for line in command_lines
+        )
+    )
+    loop_pattern = re.compile(
+        r"(?ms)^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+);\s*do\b(.*?)^\s*done\b"
+    )
+    for match in loop_pattern.finditer(text):
+        variable, iterable, body = match.groups()
+        variable_ref = rf"(?:\$\{{{re.escape(variable)}\}}|\${re.escape(variable)})"
+        upload = bool(
+            re.search(
+                rf"\bossutil(?:64)?\s+cp\b[^\n]*{variable_ref}[^\n]*oss://",
+                body,
+                re.IGNORECASE,
+            )
+        )
+        if not upload:
+            continue
+        array_ref = re.search(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\[@\]\}?", iterable)
+        source_name = array_ref.group(1) if array_ref else ""
+        if source_name in archive_arrays:
+            archive_upload = True
+        if source_name in checksum_arrays:
+            md5_upload = True
+
+    return {
+        "archive_source": archive_source,
+        "archive_upload": archive_upload,
+        "md5_generated": md5_generated,
+        "md5_upload": md5_upload,
+    }
+
+
 def match_location(paths: Iterable[Path], match: re.Match[str]) -> tuple[Path | None, int | None]:
     offset = 0
     for path in paths:
@@ -800,11 +957,23 @@ def workflow_step_context(lines: list[str], index: int) -> str:
     return "\n".join(lines[start:end])
 
 
+def workflow_job_context(lines: list[str], index: int) -> str:
+    """Include a job's matrix/env/runner declarations with a command's step."""
+    job_start = 0
+    for candidate in range(index, -1, -1):
+        if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[candidate]):
+            job_start = candidate
+            break
+    job_end = len(lines)
+    for candidate in range(job_start + 1, len(lines)):
+        if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[candidate]):
+            job_end = candidate
+            break
+    return "\n".join(lines[job_start:job_end])
+
+
 def context_has_both_platforms(context: str) -> bool:
-    return bool(
-        ("linux/amd64" in context or re.search(r"\bamd64\b", context))
-        and ("linux/arm64" in context or re.search(r"\barm64\b", context))
-    )
+    return {"amd64", "arm64"} <= workflow_architectures(context)
 
 
 def is_external_rendered_line(line: str) -> bool:

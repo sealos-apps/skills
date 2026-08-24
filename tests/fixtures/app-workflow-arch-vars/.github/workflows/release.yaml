@@ -1,0 +1,30 @@
+name: release
+jobs:
+  runtime-amd64:
+    runs-on: ubuntu-24.04
+    env:
+      ARCH: amd64
+      TARGETARCH: amd64
+    steps:
+      - name: Build runtime
+        run: docker buildx build --platform "linux/${ARCH}" -t runtime:${TARGETARCH} .
+  runtime-arm64:
+    runs-on: ubuntu-24.04-arm
+    env:
+      ARCH: arm64
+      TARGETARCH: arm64
+    steps:
+      - name: Build runtime
+        run: docker buildx build --platform "linux/${ARCH}" -t runtime:${TARGETARCH} .
+  cluster-amd64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Build cluster
+        run: |
+          ARCH=amd64 TARGETARCH=amd64 docker buildx build --platform "linux/${ARCH}" -t cluster:amd64 deploy
+  cluster-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Build cluster
+        run: |
+          ARCH=arm64 TARGETARCH=arm64 docker buildx build --platform "linux/${ARCH}" -t cluster:arm64 deploy

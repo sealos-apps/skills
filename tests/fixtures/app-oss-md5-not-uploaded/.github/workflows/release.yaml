@@ -1,0 +1,9 @@
+name: release
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Export bundle
+        run: |
+          tar -czf cluster-bundles/example-app.tar.gz deploy
+          md5sum cluster-bundles/example-app.tar.gz > cluster-bundles/example-app.md5

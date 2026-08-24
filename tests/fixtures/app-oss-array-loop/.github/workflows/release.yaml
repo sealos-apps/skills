@@ -1,0 +1,18 @@
+name: release
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Export and sync OSS
+        run: |
+          mkdir -p cluster-bundles
+          tar -czf cluster-bundles/example-app.tar.gz deploy
+          md5sum cluster-bundles/example-app.tar.gz > cluster-bundles/example-app.md5
+          archives=(cluster-bundles/*.tar.gz)
+          checksums=(cluster-bundles/*.md5)
+          for archive in "${archives[@]}"; do
+            ossutil64 cp ... "${archive}" "oss://sealos-apps/example-app/"
+          done
+          for checksum in "${checksums[@]}"; do
+            ossutil64 cp ... "${checksum}" "oss://sealos-apps/example-app/"
+          done

@@ -112,6 +112,31 @@ class SealosAppsAuditTest(unittest.TestCase):
         levels = levels_by_rule(payload)
         self.assertIn("FAIL", levels["WORKFLOW_MULTI_ARCH"])
 
+    def test_arch_variables_and_runner_matrix_cover_runtime_and_cluster(self) -> None:
+        payload = run_audit("app-workflow-arch-vars")
+        levels = levels_by_rule(payload)
+        self.assertIn("PASS", levels["WORKFLOW_MULTI_ARCH"])
+
+    def test_runtime_multi_arch_without_cluster_multi_arch_fails(self) -> None:
+        payload = run_audit("app-multi-arch-runtime-only")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["WORKFLOW_MULTI_ARCH"])
+
+    def test_oss_arrays_and_loop_variables_are_followed(self) -> None:
+        payload = run_audit("app-oss-array-loop")
+        levels = levels_by_rule(payload)
+        self.assertIn("PASS", levels["WORKFLOW_OSS_SYNC"])
+
+    def test_md5_generation_without_upload_fails(self) -> None:
+        payload = run_audit("app-oss-md5-not-uploaded")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["WORKFLOW_OSS_SYNC"])
+
+    def test_oss_evidence_in_comments_is_ignored(self) -> None:
+        payload = run_audit("app-oss-comments-only")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["WORKFLOW_OSS_SYNC"])
+
     def test_basic_bad_fixture_fails_deploy_rules(self) -> None:
         payload = run_audit("app-fail")
         levels = levels_by_rule(payload)

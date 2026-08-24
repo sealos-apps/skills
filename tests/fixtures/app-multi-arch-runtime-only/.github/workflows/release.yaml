@@ -1,0 +1,17 @@
+name: release
+jobs:
+  runtime-amd64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Build runtime
+        run: docker buildx build --platform linux/amd64 -t runtime:amd64 .
+  runtime-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Build runtime
+        run: docker buildx build --platform linux/arm64 -t runtime:arm64 .
+  cluster:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Build cluster
+        run: docker buildx build --platform linux/amd64 -t cluster:amd64 deploy
