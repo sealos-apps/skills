@@ -1,0 +1,12 @@
+name: release
+# linux/amd64 linux/arm64
+# archives=(cluster-bundles/*.tar.gz)
+# checksums=(cluster-bundles/*.md5)
+# md5sum cluster-bundles/example-app.tar.gz > cluster-bundles/example-app.md5
+# ossutil64 cp cluster-bundles/example-app.tar.gz oss://sealos-apps/example-app/
+# ossutil64 cp cluster-bundles/example-app.md5 oss://sealos-apps/example-app/
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "no release commands"
