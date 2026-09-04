@@ -20,6 +20,7 @@ IGNORED_DIRS = {".git", ".next", ".turbo", "build", "dist", "node_modules", "ven
 CATEGORY_RULES = [
     ("Deploy 结构", ["DEPLOY_DIR", "DEPLOY_BUILD_FILE", "DEPLOY_CHART", "CLUSTER_IMAGE_PACKAGING"]),
     ("Helm 部署", ["HELM_ENTRYPOINT", "HELM_CREATE_NAMESPACE", "HELM_NAMESPACE_TEMPLATE"]),
+    ("应用版本同步", ["WORKFLOW_EXISTS", "WORKFLOW_CHART_APP_VERSION_SYNC"]),
     ("Runtime/Cluster 镜像分离", ["WORKFLOW_EXISTS", "WORKFLOW_IMAGE_SPLIT", "WORKFLOW_IMAGE_NAMING", "WORKFLOW_IMAGE_CACHE"]),
     ("双架构", ["WORKFLOW_EXISTS", "WORKFLOW_MULTI_ARCH"]),
     ("OSS 推送", ["WORKFLOW_EXISTS", "WORKFLOW_OSS_SYNC"]),
@@ -31,6 +32,27 @@ CATEGORY_RULES = [
     ("国产数据库", ["DOMESTIC_DB_GLOBAL_CONFIG"]),
 ]
 SCRIPT_PATH = Path(__file__).resolve()
+if str(SCRIPT_PATH.parent) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_PATH.parent))
+from workflow_app_version import (  # noqa: E402
+    WorkflowAppVersionWrite,
+    WorkflowJob,
+    WorkflowStep,
+    workflow_app_version_writes,
+    source_kinds,
+    workflow_app_version_mutation,
+    workflow_chart_targets,
+    workflow_cluster_packaging_lines,
+    workflow_guard_profile,
+    workflow_job_packaging_lines,
+    workflow_jobs,
+    workflow_on_block,
+    workflow_path_is_safe,
+    workflow_reachable_jobs,
+    workflow_release_candidate,
+    workflow_source_kinds,
+    workflow_trigger_profile,
+)
 TOOLS_CATALOG_PATH = SCRIPT_PATH.parents[1] / "references" / "tools-functions.public.json"
 TOOLS_PATH_PATTERN = re.compile(r"(?:^|\s)(?:\.|source)\s+['\"]?/root/\.sealos/cloud/scripts/tools\.sh['\"]?")
 SHELL_FUNCTION_PATTERN = re.compile(r"(?m)^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?\s*\{")
@@ -108,6 +130,7 @@ class Checker:
         self.check_namespace_templates()
         self.check_cluster_image_packaging()
         self.check_workflows()
+        self.check_chart_app_version_sync()
         self.check_values_strategy()
         self.check_tools_dependency()
         self.check_global_http()
@@ -303,6 +326,147 @@ class Checker:
             if not oss_state["md5_upload"]:
                 missing.append(".md5 OSS 上传")
             self.add("WORKFLOW_OSS_SYNC", "FAIL", "流水线未完整包含强制 OSS 同步：" + "、".join(missing) + "。", "导出 cluster tar/tar.gz、生成 md5，并使用 ossutil cp 分别上传 tar/tar.gz 和 .md5 到 OSS。", self.workflow_files[0])
+
+    def check_chart_app_version_sync(self) -> None:
+        """Require release workflows to stamp every chart with its build identity."""
+        if not self.chart_dirs:
+            self.add(
+                "WORKFLOW_CHART_APP_VERSION_SYNC",
+                "N/A",
+                "未发现 Helm chart，跳过 appVersion 同步检查。",
+                "无需整改。",
+            )
+            return
+
+        missing_fields = []
+        unsafe_charts = []
+        for chart in self.chart_dirs:
+            chart_file = chart / "Chart.yaml"
+            try:
+                chart_file.resolve().relative_to(self.root)
+            except ValueError:
+                unsafe_charts.append(chart)
+                continue
+            if chart_file.is_symlink():
+                unsafe_charts.append(chart)
+            elif chart_app_version_line(chart_file) is None:
+                missing_fields.append(chart)
+        if unsafe_charts:
+            path = unsafe_charts[0] / "Chart.yaml"
+            self.add(
+                "WORKFLOW_CHART_APP_VERSION_SYNC",
+                "FAIL",
+                f"{self.rel(path)} 是指向仓库外部的 symlink，无法确认实际 Chart.yaml 的 appVersion。",
+                "将 Chart.yaml 替换为仓库内的普通文件后再执行 appVersion 同步。",
+                path,
+            )
+            return
+        if missing_fields:
+            path = missing_fields[0] / "Chart.yaml"
+            names = ", ".join(chart.name for chart in missing_fields)
+            self.add(
+                "WORKFLOW_CHART_APP_VERSION_SYNC",
+                "FAIL",
+                f"以下 Chart.yaml 缺少非空 appVersion：{names}。",
+                "为每个 Chart.yaml 声明 appVersion，并在发布 workflow 打包前写入当前 release tag 或提交 SHA。",
+                path,
+                chart_app_version_line(path) or 1,
+            )
+            return
+
+        release_workflows = []
+        for path in self.workflow_files:
+            code = strip_workflow_comments(read_text(path))
+            if workflow_release_candidate(path, code):
+                jobs = workflow_jobs(path, code)
+                writes = workflow_app_version_writes(path, code, self.root, self.chart_dirs)
+                release_workflows.append((path, code, jobs, writes))
+        if not release_workflows:
+            path = self.workflow_files[0] if self.workflow_files else self.workflow_dir
+            self.add(
+                "WORKFLOW_CHART_APP_VERSION_SYNC",
+                "FAIL",
+                "未发现负责发布 Chart 或 cluster image 的 workflow，无法确认 appVersion 更新。",
+                "在发布 workflow 中于 cluster image/Chart 打包前更新所有 Chart.yaml 的 appVersion。",
+                path,
+            )
+            return
+
+        problems: list[tuple[Path, int | None, str]] = []
+        for path, code, jobs, writes in release_workflows:
+            profile = workflow_trigger_profile(code)
+            package_jobs = []
+            for job in jobs:
+                package_lines = workflow_job_packaging_lines(job)
+                if package_lines:
+                    package_jobs.append((job, package_lines))
+            if not package_jobs:
+                problems.append((path, None, "无法证明 cluster image/Chart 打包 job 的执行路径，拒绝仅凭 workflow 全文判定 appVersion 已同步。"))
+                continue
+            for job, package_lines in package_jobs:
+                first_package = min(package_lines)
+                reachable = {job.job_id} | set(workflow_reachable_jobs(jobs, job.job_id))
+                reachable_jobs = [candidate for candidate in jobs if candidate.job_id in reachable]
+                if any(not workflow_path_is_safe(candidate) for candidate in reachable_jobs):
+                    problems.append((path, job.start_line, f"{path.name}:{job.job_id} 的打包路径包含 always()/continue-on-error，无法证明 appVersion 写入成功后才打包。"))
+                    continue
+                candidates = [
+                    write
+                    for write in writes
+                    if write.job_id in reachable
+                    and any(chart.name in write.targets for chart in self.chart_dirs)
+                    and (write.job_id != job.job_id or write.line < first_package)
+                ]
+                job_profile = workflow_guard_profile("", "", job.condition)
+                required_profile = job_profile if profile == "mixed" and job_profile in {"tag", "sha"} else profile
+                for chart in self.chart_dirs:
+                    chart_writes = sorted((write for write in candidates if chart.name in write.targets), key=lambda item: item.line)
+                    if not chart_writes:
+                        late = next((write for write in writes if chart.name in write.targets and write.job_id == job.job_id and write.line >= first_package), None)
+                        if late:
+                            problems.append((late.path, late.line, f"{path.name}:{job.job_id} 在 Chart/cluster image 打包后才写入 {chart.name} 的 appVersion。"))
+                        else:
+                            problems.append((path, job.start_line, f"{path.name}:{job.job_id} 未在可证明的前置执行路径中更新 {chart.name} 的 appVersion。"))
+                        continue
+                    writer_jobs = {write.job_id for write in chart_writes}
+                    if len(writer_jobs) > 1:
+                        problems.append((chart_writes[-1].path, chart_writes[-1].line, f"{path.name}:{job.job_id} 依赖多个未明确串行化的 appVersion 写入 job，无法证明最终值。"))
+                        continue
+                    if required_profile == "tag":
+                        compatible = {"unconditional", "tag"}
+                        if not any(write.tag_source and write.guard_profile in compatible for write in chart_writes) or not chart_writes[-1].tag_source or chart_writes[-1].guard_profile not in compatible:
+                            problems.append((chart_writes[-1].path, chart_writes[-1].line, f"{path.name}:{job.job_id} 未将 release tag 作为 {chart.name} appVersion 的最终写入值。"))
+                    elif required_profile == "sha":
+                        compatible = {"unconditional", "sha"}
+                        if not any(write.sha_source and write.guard_profile in compatible for write in chart_writes) or not chart_writes[-1].sha_source or chart_writes[-1].guard_profile not in compatible:
+                            problems.append((chart_writes[-1].path, chart_writes[-1].line, f"{path.name}:{job.job_id} 未将提交 SHA 作为 {chart.name} appVersion 的最终写入值。"))
+                    else:
+                        tag_ok = any(write.tag_source and write.guard_profile in {"tag", "mixed"} for write in chart_writes)
+                        sha_ok = any(write.sha_source and write.guard_profile in {"sha", "mixed"} for write in chart_writes)
+                        unsafe = any(write.guard_profile in {"unconditional", "invalid"} for write in chart_writes)
+                        if not (tag_ok and sha_ok) or unsafe:
+                            problems.append((chart_writes[-1].path, chart_writes[-1].line, f"{path.name}:{job.job_id} 的混合触发路径未用互斥条件分别写入 {chart.name} 的 release tag 与提交 SHA。"))
+        if problems:
+            path, line, detail = problems[0]
+            self.add(
+                "WORKFLOW_CHART_APP_VERSION_SYNC",
+                "FAIL",
+                detail,
+                "Tag 发布使用安全的 release tag 环境值（如 GITHUB_REF_NAME）写入完整 tag；非 Tag 构建使用 GITHUB_SHA 或 git rev-parse HEAD；混合触发必须用互斥 tag/非 tag 条件，并在同一 job 或显式 needs 前置 job 中、打包前更新所有 Chart.yaml。",
+                path,
+                line,
+            )
+            return
+        path = release_workflows[0][3][0].path if release_workflows[0][3] else release_workflows[0][0]
+        line = release_workflows[0][3][0].line if release_workflows[0][3] else None
+        profiles = {workflow_trigger_profile(item[1]) for item in release_workflows}
+        if "mixed" in profiles or {"tag", "sha"} <= profiles:
+            message = "CI 已按 Tag/非 Tag 触发类型分别将 release tag/提交 SHA 写入所有 chart 的 appVersion。"
+        elif profiles == {"tag"}:
+            message = "CI 在打包前将 release tag 写入所有 chart 的 appVersion。"
+        else:
+            message = "CI 在打包前将提交 SHA 写入所有 chart 的 appVersion。"
+        self.add("WORKFLOW_CHART_APP_VERSION_SYNC", "PASS", message, "无需整改。", path, line)
 
     def workflow_image_split_result(self, combined: str) -> tuple[str, str, str, Path, int | None]:
         recommended_runtime = re.search(r"ghcr\.io/\$\{\{\s*github\.repository\s*\}\}/\$\{\{\s*github\.repository\s*\}\}(?!-cluster)", combined)
@@ -770,6 +934,18 @@ def first_match(paths: Iterable[Path], pattern: re.Pattern[str]) -> tuple[Path |
     if not hits:
         return None, None
     return hits[0][0], hits[0][1]
+
+
+def chart_app_version_line(path: Path) -> int | None:
+    """Return the line containing a non-empty Chart.yaml appVersion field."""
+    for line_no, line in iter_lines(path):
+        if not re.match(r"^[ \t]*appVersion[ \t]*:", line):
+            continue
+        value = line.split(":", 1)[1].split("#", 1)[0].strip().lower()
+        return line_no if value and value not in {"null", "~", "''", '""'} else None
+    return None
+
+
 
 
 def strip_workflow_comments(text: str) -> str:

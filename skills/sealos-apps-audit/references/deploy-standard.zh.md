@@ -28,6 +28,7 @@
 | --- | --- | --- |
 | Deploy 结构 | 存在用户确认的 deploy 目录，存在 `Dockerfile`、`Kubefile`、`Sealfile` 任意一个，以及 `charts/<name>/Chart.yaml` | FAIL |
 | Helm 部署 | 主部署入口使用 `helm upgrade -i` 或 `helm upgrade --install`，并包含 `--create-namespace`；Helm 模板禁止自行创建 `kind: Namespace` | FAIL |
+| 应用版本同步 | 发布 workflow 在打包前更新每个 chart 的 `Chart.yaml.appVersion`；Tag 触发写入完整 release tag，非 Tag 构建可写入触发提交 SHA；`Chart.yaml.version` 不要求修改 | FAIL |
 | Cluster image | 构建文件打包 `registry`、`charts`、entrypoint/install 脚本 | FAIL |
 | Runtime/cluster 分离 | runtime image 与 cluster image 分别构建和标记，且 workflow 使用可区分的公开 GHCR 命名 | FAIL |
 | 镜像缓存 | cluster image 构建前使用 `sealos build`、`sealos registry save --registry-dir=registry --arch <arch> .` 或 `sreg save` 任一入口 | FAIL |
@@ -67,6 +68,18 @@ cluster image 构建文件必须包含以下内容或等价复制：
 - 需要读取平台配置时，优先复用 `/root/.sealos/cloud/scripts/tools.sh` 中的公开 helper。
 
 Helm 模板禁止自行创建 `kind: Namespace`。命名空间由部署入口和 Sealos 运行环境负责，chart 模板内重复创建命名空间会造成升级和权限边界不稳定。
+
+## 应用版本同步
+
+每个 `deploy/charts/<name>/Chart.yaml` 必须声明非空的 `appVersion`。负责发布 Chart 或 cluster image 的 workflow 必须在打包前更新该字段，确保产物中的应用版本对应本次构建。
+
+版本来源按 workflow 触发类型处理：
+
+- Tag 触发（`push.tags` 或 `release`）使用完整 release tag，例如 `v1.4.2`。推荐将 `github.ref_name` 通过 `env` 传给 `GITHUB_REF_NAME`，再使用 `strenv(GITHUB_REF_NAME)`；`refs/tags/v1.4.2` 不能未经处理直接写入，也不要把 `${{ github.ref_name }}` 直接拼进 shell 命令。
+- 非 Tag 构建可以使用 `github.sha` 或 `GITHUB_SHA`，也可以写成 `sha-<commit-sha>`。
+- 同时支持 Tag 和非 Tag 的 workflow 必须显式分支，Tag 使用 release tag，其它触发使用提交 SHA。
+
+检测器只接受 workflow 中能定位到对应 `Chart.yaml` 的显式字段写入证据（例如 `sed`、`yq` 或等价脚本），不要求修改 `Chart.yaml.version`，也不要求 CI 将修改提交回 Git 仓库。
 
 ## Workflow 镜像命名
 

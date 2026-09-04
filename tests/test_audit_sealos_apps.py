@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -10,6 +11,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "sealos-apps-audit" / "scripts" / "audit_sealos_apps.py"
 FIXTURES = ROOT / "tests" / "fixtures"
+
+
+def load_audit_module() -> object:
+    spec = importlib.util.spec_from_file_location("audit_sealos_apps_under_test", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise AssertionError("unable to load audit module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def run_audit(fixture: str) -> dict[str, object]:
@@ -68,7 +79,104 @@ class SealosAppsAuditTest(unittest.TestCase):
         self.assertFalse([item for item in findings if item["level"] == "FAIL"])
         levels = levels_by_rule(payload)
         self.assertIn("PASS", levels["WORKFLOW_OSS_SYNC"])
+        self.assertIn("PASS", levels["WORKFLOW_CHART_APP_VERSION_SYNC"])
         self.assertIn("N/A", levels["DOMESTIC_DB_GLOBAL_CONFIG"])
+
+    def test_tag_release_stamps_chart_app_version(self) -> None:
+        payload = run_audit("app-pass")
+        levels = levels_by_rule(payload)
+        self.assertIn("PASS", levels["WORKFLOW_CHART_APP_VERSION_SYNC"])
+
+    def test_missing_chart_app_version_is_failure(self) -> None:
+        payload = run_audit("app-oss-missing")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["WORKFLOW_CHART_APP_VERSION_SYNC"])
+
+    def test_chart_app_version_without_ci_update_is_failure(self) -> None:
+        payload = run_audit("app-oss-md5-missing")
+        levels = levels_by_rule(payload)
+        self.assertIn("FAIL", levels["WORKFLOW_CHART_APP_VERSION_SYNC"])
+
+    def test_tag_and_sha_sources_are_distinguished(self) -> None:
+        audit = load_audit_module()
+        self.assertEqual("tag", audit.workflow_trigger_profile('on:\n  push:\n    tags: ["v*"]'))
+        self.assertEqual("sha", audit.workflow_trigger_profile("on:\n  push:\n    branches: [main]"))
+        self.assertEqual((True, False), audit.workflow_source_kinds(
+            "yq -i '.appVersion = strenv(GITHUB_REF_NAME)' deploy/charts/example-app/Chart.yaml",
+            "",
+        ))
+        self.assertEqual((False, False), audit.workflow_source_kinds(
+            "sed -i 's/appVersion:.*/appVersion: ${GITHUB_REF_NAME}/' deploy/charts/example-app/Chart.yaml",
+            "",
+        ))
+        self.assertEqual((False, True), audit.workflow_source_kinds(
+            "yq -i '.appVersion = (\"sha-\" + strenv(GITHUB_SHA))' deploy/charts/example-app/Chart.yaml",
+            "",
+        ))
+
+    def test_app_version_evidence_rejects_decoys_and_unsafe_paths(self) -> None:
+        audit = load_audit_module()
+        root = Path("/repo")
+        charts = [root / "deploy" / "charts" / "example-app"]
+        self.assertEqual(frozenset(), audit.workflow_chart_targets(
+            "working-directory: deploy/charts/example-app\n"
+            "yq -i '.appVersion = strenv(GITHUB_REF_NAME)' /tmp/nope/Chart.yaml",
+            root,
+            charts,
+        ))
+        self.assertEqual(frozenset(), audit.workflow_chart_targets(
+            "working-directory: deploy/charts/example-app\n"
+            "yq -i '.appVersion = strenv(GITHUB_REF_NAME)' deploy\\charts\\example-app\\Chart.yaml",
+            root,
+            charts,
+        ))
+        self.assertEqual(frozenset(), audit.workflow_chart_targets(
+            "yq -i '.appVersion = strenv(GITHUB_REF_NAME)' ${{ github.workspace }}deploy/charts/example-app/Chart.yaml",
+            root,
+            charts,
+        ))
+        self.assertFalse(audit.workflow_app_version_mutation(
+            'echo "yq -i \' .appVersion = strenv(GITHUB_REF_NAME) \' deploy/charts/example-app/Chart.yaml"',
+        ))
+        self.assertFalse(audit.workflow_app_version_mutation(
+            "sed 's/appVersion:.*/appVersion: fixed/' deploy/charts/example-app/Chart.yaml",
+        ))
+
+    def test_app_version_source_and_guard_parsers_are_conservative(self) -> None:
+        audit = load_audit_module()
+        command = "yq -i '.appVersion = strenv(VERSION)' deploy/charts/example-app/Chart.yaml"
+        self.assertEqual((False, False), audit.workflow_source_kinds(command, "with:\n  env:\n    VERSION: ${{ github.ref_name }}"))
+        self.assertEqual((False, False), audit.workflow_source_kinds(
+            "yq -i \".appVersion = 0 | .buildTag = strenv(GITHUB_SHA)\" deploy/charts/example-app/Chart.yaml",
+            "",
+        ))
+        self.assertEqual((False, False), audit.workflow_source_kinds(
+            "yq -i \".appVersion = 'strenv(GITHUB_SHA)'\" deploy/charts/example-app/Chart.yaml",
+            "",
+        ))
+        self.assertEqual("invalid", audit.workflow_guard_profile("", "github.ref_type == 'tag' || true", ""))
+        self.assertEqual("invalid", audit.workflow_guard_profile("", "${{ false }}", ""))
+        self.assertEqual("mixed", audit.workflow_guard_profile(
+            "if [ \"$GITHUB_REF_TYPE\" = \"tag\" ]; then\n"
+            " yq -i '.appVersion = strenv(GITHUB_REF_NAME)' Chart.yaml\n"
+            "else\n"
+            " yq -i '.appVersion = strenv(GITHUB_SHA)' Chart.yaml\nfi",
+        ))
+
+    def test_trigger_and_packaging_boundaries_ignore_text_markers(self) -> None:
+        audit = load_audit_module()
+        self.assertEqual("mixed", audit.workflow_trigger_profile("on: {push: {tags: ['v*']}}"))
+        self.assertEqual("tag", audit.workflow_trigger_profile("on:\n  push:\n    tags-ignore: ['nightly']"))
+        self.assertEqual("mixed", audit.workflow_trigger_profile("on:\n  mystery_event:"))
+        step = audit.WorkflowStep(1, 2, "- run: echo 'sealos build deploy'", "echo 'sealos build deploy'", None, "")
+        job = audit.WorkflowJob(Path("workflow.yaml"), "release", 1, 2, step.text, frozenset(), "", (step,))
+        self.assertEqual([], audit.workflow_job_packaging_lines(job))
+        script_step = audit.WorkflowStep(1, 2, "- run: ./ship.sh", "./ship.sh", None, "")
+        script_job = audit.WorkflowJob(Path("workflow.yaml"), "release", 1, 2, script_step.text, frozenset(), "", (script_step,))
+        self.assertEqual([1], audit.workflow_job_packaging_lines(script_job))
+        suppressed_step = audit.WorkflowStep(1, 2, "- run: yq ... || true", "yq -i '.appVersion = strenv(GITHUB_REF_NAME)' Chart.yaml || true", None, "")
+        suppressed_job = audit.WorkflowJob(Path("workflow.yaml"), "release", 1, 2, suppressed_step.text, frozenset(), "", (suppressed_step,))
+        self.assertFalse(audit.workflow_path_is_safe(suppressed_job))
 
     def test_missing_oss_is_failure(self) -> None:
         payload = run_audit("app-oss-missing")

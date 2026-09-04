@@ -39,6 +39,7 @@ Use this skill to audit Sealos app source repositories without modifying them. T
 - `global.http` is checked across entrypoint arguments, chart values, template static scanning, and local `helm template` HTTP-mode rendering when Helm is available.
 - Node TLS is required only when Node/frontend signals are detected, and must connect `CERT_MODE` to `platform.tlsRejectUnauthorized` and container `NODE_TLS_REJECT_UNAUTHORIZED`.
 - GitHub Actions must avoid the legacy image names `ghcr.io/${{ github.repository }}` and `ghcr.io/${{ github.repository }}-cluster`; use the nested public GHCR package names documented in `references/deploy-standard.zh.md`.
+- Release workflows must update every chart's `appVersion` before packaging: tag-triggered runs use the exact release tag, while non-tag runs may use the triggering commit SHA; `Chart.version` is not required to change.
 - Multi-arch evidence must distinguish runtime and cluster artifacts when manifest/imagetools are used; buildx multi-platform evidence is accepted when amd64 and arm64 are both present.
 - Human reports should include evidence, impact, remediation, and recheck guidance for each `FAIL` or `WARN`.
 
