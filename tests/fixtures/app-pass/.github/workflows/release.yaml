@@ -11,6 +11,9 @@ jobs:
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp chart appVersion
+        working-directory: deploy/charts/example-app
+        run: yq -i '.appVersion = strenv(GITHUB_REF_NAME)' Chart.yaml
       - name: Build runtime image
         run: |
           docker buildx build --platform linux/${{ matrix.arch }} -t ghcr.io/${{ github.repository }}/${{ github.repository }}:${{ matrix.arch }} .

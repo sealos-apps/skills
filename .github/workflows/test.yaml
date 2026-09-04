@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile scripts
-        run: python3 -m py_compile skills/sealos-apps-audit/scripts/audit_sealos_apps.py
+        run: python3 -m py_compile skills/sealos-apps-audit/scripts/audit_sealos_apps.py skills/sealos-apps-audit/scripts/workflow_app_version.py
       - name: Run tests
         run: python3 -m unittest discover -s tests
       - name: Validate skill metadata

@@ -4,7 +4,7 @@ Public Codex skills for the `sealos-apps` organization.
 
 ## Skills
 
-- `sealos-apps-audit`: read-only audit for Sealos app source repositories, covering deploy layout, Helm entrypoints, GitHub Actions release flow, public GHCR image naming, runtime/cluster multi-arch evidence, mandatory OSS sync, values loading, `global.http` HTTP-mode rendering, Node TLS, and optional database compatibility checks.
+- `sealos-apps-audit`: read-only audit for Sealos app source repositories, covering deploy layout, Helm entrypoints, GitHub Actions release flow and chart `appVersion` stamping, public GHCR image naming, runtime/cluster multi-arch evidence, mandatory OSS sync, values loading, `global.http` HTTP-mode rendering, Node TLS, and optional database compatibility checks.
 
 ## Use
 
