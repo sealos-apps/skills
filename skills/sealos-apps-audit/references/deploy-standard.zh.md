@@ -73,6 +73,8 @@ Helm 模板禁止自行创建 `kind: Namespace`。命名空间由部署入口和
 
 每个 `deploy/charts/<name>/Chart.yaml` 必须声明非空的 `appVersion`。负责发布 Chart 或 cluster image 的 workflow 必须在打包前更新该字段，确保产物中的应用版本对应本次构建。
 
+审计以实际 Chart/cluster image 打包步骤为边界；普通 `pnpm build`、runtime 镜像构建和无部署上下文的 `make build` 不单独构成发布证据。job 级发布开关（包括 `||`）不等于跳过版本写入；写入步骤本身仍须满足 Tag/SHA 条件检查。无关扫描或上传步骤的 `always()` 不影响判定，但写入/打包步骤及依赖 job 上绕过失败的条件、写入步骤吞错仍会被拒绝。
+
 版本来源按 workflow 触发类型处理：
 
 - Tag 触发（`push.tags` 或 `release`）使用完整 release tag，例如 `v1.4.2`。推荐将 `github.ref_name` 通过 `env` 传给 `GITHUB_REF_NAME`，再使用 `strenv(GITHUB_REF_NAME)`；`refs/tags/v1.4.2` 不能未经处理直接写入，也不要把 `${{ github.ref_name }}` 直接拼进 shell 命令。
