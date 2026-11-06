@@ -4,6 +4,8 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -177,6 +179,61 @@ class SealosAppsAuditTest(unittest.TestCase):
         suppressed_step = audit.WorkflowStep(1, 2, "- run: yq ... || true", "yq -i '.appVersion = strenv(GITHUB_REF_NAME)' Chart.yaml || true", None, "")
         suppressed_job = audit.WorkflowJob(Path("workflow.yaml"), "release", 1, 2, suppressed_step.text, frozenset(), "", (suppressed_step,))
         self.assertFalse(audit.workflow_path_is_safe(suppressed_job))
+
+    def test_app_version_release_path_regressions(self) -> None:
+        workflow = textwrap.dedent("""\
+            on:
+              push:
+                tags: ['v*']
+              workflow_dispatch:
+            jobs:
+              runtime:
+                steps:
+                  - run: make -C controller build TARGETARCH=amd64
+                  - run: docker build -f controller/Dockerfile controller
+                  - uses: actions/upload-artifact@v4
+                    if: always()
+              cluster:
+                needs: runtime
+                if: github.event_name == 'push' || inputs.publish_images == true
+                steps:
+                  - run: |
+                      if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+                        sed -i "s/^appVersion:.*/appVersion: $GITHUB_REF_NAME/" deploy/charts/app/Chart.yaml
+                      else
+                        sed -i "s/^appVersion:.*/appVersion: $GITHUB_SHA/" deploy/charts/app/Chart.yaml
+                      fi
+                  - run: docker build -f deploy/Kubefile deploy
+                  - uses: actions/upload-artifact@v4
+                    if: always()
+            """)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chart = root / "deploy/charts/app"
+            chart.mkdir(parents=True)
+            (chart / "Chart.yaml").write_text("appVersion: dev\n")
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "ci.yml").write_text("on: pull_request\njobs:\n  test:\n    steps:\n      - run: pnpm build\n")
+            path = workflows / "images.yml"
+            for label, content, expected in (
+                ("valid", workflow, "PASS"),
+                ("missing", workflow.replace("sed -i", "echo"), "FAIL"),
+                ("wrong source", workflow.replace("$GITHUB_SHA", "fixed"), "FAIL"),
+                ("conditional stamp", workflow.replace("      - run: |", "      - if: inputs.stamp == true\n        run: |"), "FAIL"),
+                ("disjunctive stamp", workflow.replace("      - run: |", "      - if: github.ref_type == 'tag' || true\n        run: |"), "FAIL"),
+                ("ignored stamp error", workflow.replace("      - run: |", "      - continue-on-error: true\n        run: |"), "FAIL"),
+                ("forced packaging", workflow.replace("      - run: docker build -f deploy/Kubefile deploy", "      - if: always()\n        run: docker build -f deploy/Kubefile deploy"), "FAIL"),
+                ("negated success", workflow.replace("      - run: docker build -f deploy/Kubefile deploy", "      - if: ${{ !success() }}\n        run: docker build -f deploy/Kubefile deploy"), "FAIL"),
+                ("stamp after packaging", workflow.replace("      - run: |", "      - run: docker build -f deploy/Kubefile deploy\n      - run: |"), "FAIL"),
+                ("suppressed failure", workflow.replace('sed -i "s/^appVersion:.*/appVersion: $GITHUB_SHA/" deploy/charts/app/Chart.yaml', 'sed -i "s/^appVersion:.*/appVersion: $GITHUB_SHA/" deploy/charts/app/Chart.yaml || true'), "FAIL"),
+            ):
+                with self.subTest(label=label):
+                    path.write_text(content)
+                    result = subprocess.run([sys.executable, str(SCRIPT), str(root), "--deploy-dir", "deploy", "--app-type", "app", "--format", "json"], capture_output=True, text=True)
+                    self.assertIn(result.returncode, {0, 1}, result.stderr)
+                    levels = levels_by_rule(json.loads(result.stdout))
+                    self.assertEqual([expected], levels["WORKFLOW_CHART_APP_VERSION_SYNC"])
 
     def test_missing_oss_is_failure(self) -> None:
         payload = run_audit("app-oss-missing")

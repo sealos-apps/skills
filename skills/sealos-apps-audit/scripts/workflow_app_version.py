@@ -940,7 +940,13 @@ def _shell_guard_profile(command: str) -> str:
 
 
 def workflow_guard_profile(command: str, step_condition: str = "", job_condition: str = "") -> str:
-    conditions = [condition.strip() for condition in (step_condition, job_condition) if condition.strip()]
+    # Job conditions gate the entire writer/package path. An arbitrary job
+    # switch cannot skip just the stamp; only recognized ref guards narrow it.
+    job_profile = ""
+    if "||" not in job_condition:
+        if _tag_guard(job_condition) or _sha_guard(job_condition):
+            job_profile = job_condition
+    conditions = [condition.strip() for condition in (step_condition, job_profile) if condition.strip()]
     profiles = []
     for condition in conditions:
         # A disjunction can make a supposedly tag/sha-specific write execute
@@ -1024,7 +1030,10 @@ def workflow_job_packaging_lines(job: WorkflowJob) -> list[int]:
         if any(
             (
                 _command_name(segment).lower() == "make"
-                and re.search(r"\b(?:package|release|cluster|build)\b", segment, re.IGNORECASE)
+                and (
+                    re.search(r"\b(?:package|release|cluster|build:cluster)\b", segment, re.IGNORECASE)
+                    or (re.search(r"\bbuild\b", segment) and re.search(r"\bdeploy\b|\bcluster\b", context))
+                )
             )
             or (
                 _command_name(segment).lower() in {"npm", "pnpm"}
@@ -1046,22 +1055,26 @@ def workflow_job_packaging_lines(job: WorkflowJob) -> list[int]:
 
 def workflow_path_is_safe(job: WorkflowJob) -> bool:
     """Return whether a job can be relied on for a successful package path."""
-    conditions = [job.condition] + [step.condition for step in job.steps]
+    package_lines = workflow_job_packaging_lines(job)
+    relevant = [step for step in job.steps if workflow_app_version_mutation(step.command) or step.start_line in package_lines]
+    conditions = [job.condition] + [step.condition for step in relevant]
     for condition in conditions:
-        if not condition:
-            continue
-        if re.search(r"\b(?:always|failure|cancelled|false)\b", condition, re.IGNORECASE):
+        if re.search(r"\b(?:always|failure|cancelled)\s*\(", condition, re.IGNORECASE):
             return False
-        if workflow_guard_profile("", condition, "") == "invalid":
-            return False
-    for line in job.text.splitlines():
+        if re.search(r"\bsuccess\s*\(", condition, re.IGNORECASE):
+            if "||" in condition or re.search(r"!\s*success\s*\(|success\s*\(\s*\)\s*(?:==|!=)", condition, re.IGNORECASE):
+                return False
+    # Unrelated setup/scanning/upload steps cannot bypass a failed stamp.
+    job_header = job.text.split("    steps:", 1)[0]
+    safety_text = "\n".join([job_header] + [step.text for step in relevant])
+    for line in safety_text.splitlines():
         match = re.match(r"^\s*(?:-\s*)?continue-on-error\s*:\s*(.*?)\s*$", line, re.IGNORECASE)
         if match and match.group(1).strip().lower() not in {"false", "${{ false }}"}:
             return False
-    for step in job.steps:
+    for step in relevant:
         if re.search(r"\|\|\s*(?:true|:)\b|\bset\s*\+e\b", step.command, re.IGNORECASE):
             return False
-        if re.search(r"\bif\b", step.command, re.IGNORECASE) and workflow_guard_profile(step.command, step.condition, job.condition) == "invalid":
+        if workflow_app_version_mutation(step.command) and workflow_guard_profile(step.command, step.condition, job.condition) == "invalid":
             return False
     return True
 
@@ -1071,18 +1084,8 @@ def workflow_release_candidate(path: Path, text: str) -> bool:
     if any(workflow_job_packaging_lines(job) for job in jobs):
         return True
     if jobs:
-        # A workflow with parsed jobs is a candidate only when an executable
-        # build/package command (or a reusable packaging action) is present.
-        for job in jobs:
-            for step in job.steps:
-                if re.search(r"^\s*(?:-\s+)?uses\s*:\s*['\"]?(?:[^\n]*)(?:package|publish|release|cluster)", step.text, re.IGNORECASE | re.MULTILINE):
-                    return True
-                for segment in _shell_segments(step.command):
-                    name = _command_name(segment).lower()
-                    if name in {"docker", "helm", "sealos", "make", "npm", "pnpm", "bash", "sh"} and re.search(r"\b(?:build|package|release|cluster|publish)\b", segment, re.IGNORECASE):
-                        return True
-                    if _is_local_script(segment):
-                        return True
+        # Use the same packaging boundary as the per-job check. Generic
+        # application builds do not consume Chart.yaml.
         return False
     command_text = _target_command_text(text)
     build = any(
